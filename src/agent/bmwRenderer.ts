@@ -12,12 +12,13 @@
 // + voice-status UI so the car visibly tracks the emulator. This is the web
 // equivalent of the planned Unity renderer (spec §4, Phase 4b).
 //
-// Four event types (spec §4.5), envelope `{ v, event }`, v=1, all values are
+// Event types (spec §4.5), envelope `{ v, event }`, v=1 or v=2, all values are
 // JSON strings ("true"/"20"/"OPEN"):
 //   snapshot     — full flattened state, always the first line
 //   state_change — { changes:[{path,from,to}], state_summary }
 //   animation    — { target, action, detail }  (physical actuation cue)
 //   activation   — { kind, detail }             (VAD / wake / endpoint)
+//   outcome      — { intent, result, reason }   (v2: the grounding verdict for a turn)
 //
 // This web sedan rig models a SUBSET of what a 3-series tracks. Mapped paths
 // drive the car; everything else (windows, sunroof, ambient color, drive mode,
@@ -36,9 +37,14 @@ import {
 } from "../state/vehicleCommands";
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
-import { setPhase, setTranscript, pushConsole } from "./agentStore";
+import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
 
-export const PROTOCOL_VERSION = 1;
+// The newest protocol version this renderer understands.
+export const PROTOCOL_VERSION = 2;
+// Versions we accept. v2 (assistant #179 + the emulator `--ui` bridge) adds the
+// `outcome` event and is additive over v1 (spec §4.5: additive evolution, ignore
+// unknown fields), so we still accept a v1 stream from an older emulator.
+const SUPPORTED_VERSIONS = new Set([1, 2]);
 
 /** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
 const HEAT_INFER_F = 74;
@@ -231,11 +237,36 @@ function onActivation(evt: { kind?: string; detail?: string }): void {
   else if (/idle|reset|done|silence/.test(kind)) setPhase("idle");
 }
 
+// Human-readable labels for the v2 `outcome.result` enum.
+const OUTCOME_LABEL: Record<string, string> = {
+  applied: "applied",
+  read: "read",
+  rejected: "rejected",
+  not_equipped: "not equipped",
+  not_implemented: "not implemented",
+};
+
+function onOutcome(evt: { intent?: string; result?: string; reason?: string }): void {
+  // The v2 grounding verdict for a turn. For applied/read the visible change already
+  // arrived via state_change; this surfaces WHY a command did nothing — a feature this
+  // trim lacks (not_equipped) or one the emulator can't ground yet (not_implemented) —
+  // so it is visible in the console instead of silently ignored.
+  const intent = evt.intent ? String(evt.intent) : "(unknown)";
+  const result = String(evt.result ?? "");
+  const label = OUTCOME_LABEL[result] ?? result ?? "";
+  const reason = evt.reason ? ` — ${String(evt.reason)}` : "";
+  const level: LogLevel = result === "applied" || result === "read" ? "event" : "error";
+  pushConsole(level, `bmw ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
+}
+
 function dispatch(evt: unknown): void {
   if (evt == null || typeof evt !== "object") return;
   const e = evt as Record<string, unknown>;
-  if (e.v !== undefined && e.v !== PROTOCOL_VERSION) {
-    pushConsole("error", `bmw: refusing unknown protocol v=${String(e.v)} (support v=${PROTOCOL_VERSION})`);
+  if (e.v !== undefined && !SUPPORTED_VERSIONS.has(e.v as number)) {
+    pushConsole(
+      "error",
+      `bmw: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
+    );
     return;
   }
   switch (e.event) {
@@ -247,6 +278,8 @@ function dispatch(evt: unknown): void {
       return onAnimation(e as { target?: string; action?: string; detail?: string });
     case "activation":
       return onActivation(e as { kind?: string; detail?: string });
+    case "outcome":
+      return onOutcome(e as { intent?: string; result?: string; reason?: string });
     default:
       pushConsole("event", `bmw: ignored event "${String(e.event)}"`);
   }
