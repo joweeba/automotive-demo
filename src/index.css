@@ -1,0 +1,147 @@
+/* ------------------------------------------------------------------ *
+ * Global stylesheet — Tidal design system (Liquid AI)
+ * Setup ref: https://tidal.liquid-internal.com/installation
+ * ------------------------------------------------------------------ */
+
+/* 1. Tidal design tokens (CSS custom properties: colors, radii, etc.).
+   Must be the first statement — CSS @import rules precede all others. */
+@import "@liquidai/tokens/css";
+
+/* 2. Tailwind layers (the Tidal tailwind preset is wired in tailwind.config.ts). */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 3. Self-hosted fonts (Tidal type system: Inter / Iowan Old Style / JetBrains Mono).
+   Drop the font files into public/fonts/ to activate them — until then the
+   system-font fallbacks below render fine. See CLAUDE.md ("Design system"). */
+@font-face {
+  font-family: "Inter";
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/Inter-Variable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono-Variable.ttf") format("truetype");
+}
+
+/* Tidal exposes --foreground-muted but no --muted background token; alias it to
+   the secondary background so Figma's var(--muted) references resolve (light + dark). */
+:root {
+  --muted: var(--background-secondary);
+  /* Liquid brand purple for the agent chat (this Tidal build ships no --primary;
+     the violet accent lives in the chart tokens). Drives the speech glow + square. */
+  --agent-accent: var(--chart-2);
+}
+
+/* Agent response — ChatGPT/Claude-style per-word reveal (fade + de-blur, staggered).
+   `backwards` fill holds the hidden state during the delay, then reverts to the base
+   class after — so karaoke word-lighting still works once the reveal is done. */
+@keyframes stream-word {
+  from { opacity: 0; filter: blur(4px); transform: translateY(3px); }
+  to { opacity: 1; filter: blur(0); transform: translateY(0); }
+}
+.stream-word {
+  display: inline-block;
+  animation: stream-word 0.4s ease-out backwards;
+}
+
+/* Chat message entering the transcript. */
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.msg-enter { animation: msg-enter 0.3s ease-out; }
+
+/* Voice-agent status modal (AgentStatus) — one animation per pipeline phase. */
+@keyframes agent-status-pop {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.agent-status-pop { animation: agent-status-pop 0.25s ease-out; }
+
+/* Voice-activity + speaking waveform bars. */
+@keyframes agent-wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.agent-wave {
+  height: 100%;
+  transform-origin: center;
+  animation: agent-wave 0.9s ease-in-out infinite;
+}
+
+/* Wake-word detected — expanding ring. */
+@keyframes agent-ping {
+  0% { transform: scale(0.8); opacity: 0.9; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+.agent-ping { animation: agent-ping 1.2s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+/* Processing — bouncing dots. */
+@keyframes agent-dot {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-3px); }
+}
+.agent-dot { animation: agent-dot 1s ease-in-out infinite; }
+
+/* Agent chat — shimmering placeholder text (Thinking… / Calling tools…) and the
+   speech-listening glow on the composer. */
+@keyframes agent-shimmer {
+  0%,
+  100% {
+    color: var(--muted-foreground);
+    opacity: 0.55;
+  }
+  50% {
+    color: var(--foreground);
+    opacity: 1;
+  }
+}
+.agent-shimmer {
+  color: var(--muted-foreground);
+  animation: agent-shimmer 1.5s ease-in-out infinite;
+}
+/* Agent chat panel sliding in from the right edge (pushes the config panel left). */
+@keyframes agent-slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.agent-slide-in {
+  animation: agent-slide-in 0.3s ease-out;
+}
+@keyframes agent-listen {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px var(--agent-accent), 0 0 14px -2px var(--agent-accent);
+  }
+  50% {
+    box-shadow: 0 0 0 1px var(--agent-accent), 0 0 22px 1px var(--agent-accent);
+  }
+}
+.agent-listening {
+  animation: agent-listen 1.8s ease-in-out infinite;
+}
+
+/* 4. App base. */
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: var(--background);
+  color: var(--foreground);
+}
