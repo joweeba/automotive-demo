@@ -1,20 +1,164 @@
 # Automotive Assistant Demo
 
-Web UI demo: an on-device AI assistant controlling a 3D vehicle.
-Designs: see Figma link in CLAUDE.md. Rig spec, effects inventory, and
-architecture guidance: **CLAUDE.md** (read it first — Claude Code does automatically).
+A web UI demo for an automotive client: an on-device **Liquid** AI assistant controlling a
+3D sedan. A rigged GLB renders center stage; a Tidal control sidebar and a "Liquid agent"
+chat drive named animations and effect overlays on the car (climate glow, wind washes,
+seat-heat sprites, head/tail/fog light beams, doors/trunk/frunk, camera presets…).
+
+Built with **Vite + React + react-three-fiber + Tidal** (Liquid AI's design system).
+
+---
 
 ## Quick start
-1. `git init && git add -A && git commit -m "starter kit"`
-2. Open in Claude Code and ask it to scaffold the app per CLAUDE.md
-   (Vite + React + react-three-fiber), porting behaviors from
-   `reference/sedan_demo_viewer.html` one at a time.
-3. To eyeball the reference implementation: open
-   `reference/sedan_demo_viewer.html` in a browser and drop
-   `public/models/sedan_animated_gray.glb` onto it.
 
-## What's here
-- `public/models/` — rigged, animated, gray-painted sedan GLB
-- `reference/` — working single-file viewer (acceptance reference), rig
-  data (`rig/sedan_hinges.json`), and design boards (`comps/`)
-- `assets/` — wind wash PNGs and the seat-heat icon SVG
+```bash
+npm install
+npm run dev        # Vite dev server → http://localhost:5173
+npm run build      # type-check + production build
+npm run typecheck
+```
+
+Everything is driven by a single source-of-truth state object; the sidebar controls and
+the assistant mutate it through the **same** named command layer, so the car reacts
+identically whether a knob or the model drives it.
+
+---
+
+## Connecting an LLM assistant
+
+The whole point of the state/command architecture is that **an LLM can drive every control
+the UI can**. The app exposes one global bridge, **`window.LiquidCar`**, that your
+assistant hooks into. There is no build step or SDK to wire up — it's available on `window`
+as soon as the app mounts.
+
+> **Full API reference + every tool's parameters: [`AGENT_TOOLBOX.md`](./AGENT_TOOLBOX.md).**
+
+### How the toolkit works
+
+```
+Sidebar controls ─┐
+Agent chat        ├─►  vehicleCommands  ─►  vehicleState (single source of truth)  ─►  3D viewer
+Your LLM ─────────┘        ▲
+                           │
+   window.LiquidCar.invoke(name, args)  ──►  toolbox.ts  (wraps each command as a tool
+                                              with a JSON-schema param spec + validation)
+```
+
+- **`src/state/vehicleCommands.ts`** — the canonical named command vocabulary; the only way
+  state is mutated.
+- **`src/agent/toolbox.ts`** — wraps each command as a **tool** with a JSON-schema-style
+  parameter spec, validation, and a human-readable result string. This is the LLM tool surface.
+- **`src/agent/agentRuntime.ts`** — installs **`window.LiquidCar`**: the tool manifest,
+  `invoke()`, a read-only state snapshot, and helpers to drive the chat transcript and the
+  voice-status UI.
+
+### The bridge at a glance
+
+```js
+window.LiquidCar.version                       // "1.0.0"
+window.LiquidCar.tools                          // [{ name, description, parameters }, …] — 20 tools
+window.LiquidCar.invoke("setClimateMode", { mode: "heat" })  // → "Climate set to heat."
+window.LiquidCar.getState()                     // read-only snapshot (incl. resolved 'auto' values)
+window.LiquidCar.subscribe(cb)                  // → unsubscribe()
+
+window.LiquidCar.chat.{ open, close, userMessage, respond, setTranscript }
+window.LiquidCar.agent.{ setPhase, muteMic, unmuteMic, setMicMuted, log, clearLog }
+```
+
+### Wiring it to a model (tool-calling loop)
+
+1. **Register the tools.** Map `LiquidCar.tools` onto your provider's function-tool schema.
+   Each entry is `{ name, description, parameters }`, where `parameters` is a map of
+   `{ type, description, enum?, minimum?, maximum?, required? }` — a near-drop-in for
+   OpenAI/Anthropic tool definitions.
+
+   ```js
+   // Anthropic example
+   const tools = window.LiquidCar.tools.map((t) => ({
+     name: t.name,
+     description: t.description,
+     input_schema: {
+       type: "object",
+       properties: t.parameters,
+       required: Object.entries(t.parameters)
+         .filter(([, p]) => p.required)
+         .map(([k]) => k),
+     },
+   }));
+   ```
+
+2. **On each tool call the model emits, run it and feed the result back:**
+
+   ```js
+   const result = window.LiquidCar.invoke(call.name, call.input); // runs the real action, returns a string
+   // → return `result` to the model as the tool_result for `call`
+   ```
+
+   `invoke` validates arguments, mutates the car (it visibly reacts), returns a confirmation
+   string, and **throws** with a clear message on an unknown tool or bad input.
+
+3. **Give the model context** with `window.LiquidCar.getState()` (current + resolved settings).
+
+### Driving the chat + voice UI (optional but recommended)
+
+Post the conversation into the panel and animate the voice-pipeline states:
+
+```js
+const LC = window.LiquidCar;
+LC.chat.open();
+
+LC.agent.setPhase("wake");                        // "Wake word detected" — pulse ring
+LC.agent.setPhase("voice");                        // "Listening…" — live waveform (VAD)
+LC.chat.setTranscript("keep the kids warm…");      // partial transcript under the modal
+
+LC.agent.setPhase("processing");                   // "Thinking…" — bouncing dots
+LC.chat.userMessage("The kids are sleeping in the back, keep them warm.");
+
+const results = [
+  LC.invoke("setClimateMode", { mode: "heat" }),
+  LC.invoke("setSeatHeater", { seat: "rear", level: 2 }),
+];
+
+LC.agent.setPhase("speaking");                     // "Speaking…" — waveform
+LC.chat.respond({
+  text: "Got it — warming the cabin and the back seats.",
+  toolLabel: `Tool call (${results.length})`,
+  toolResults: results,                            // shown in the collapsible tool block
+  final: "The heat is on. Anything else?",
+  duration: "7.0k tokens · 1m20s · 44.5 tok/s",
+});
+LC.agent.setPhase("idle");                         // hide the status modal
+```
+
+Voice phases: `idle | wake | voice | processing | speaking` — each animates a status modal.
+Every `invoke(...)` is auto-logged to the in-panel console (toggle it with the terminal
+icon in the chat header) so you get a live trace of what the assistant did.
+
+### What ships vs. what you wire up
+
+- **Shipped:** the full tool surface, the car, the chat panel, the voice-status UI + console,
+  and a mock Spotify player. A scripted demo (`src/agent/scripts.ts`) fires the real tools
+  for the "keep the kids warm" utterance so you can see it end-to-end.
+- **You provide:** the actual model + audio pipeline (ASR / wake word / VAD / TTS). Replace
+  the scripted `resolveScript` path with a real tool-calling loop against `LiquidCar`.
+
+---
+
+## Tools at a glance
+
+Climate/interior · camera · exterior lights · wipers · trunk/frunk · environment
+(outside temp + weather, which drive every `auto` setting) · music (play/pause, next/prev,
+**volume**, seek). Full signatures and examples: **[`AGENT_TOOLBOX.md`](./AGENT_TOOLBOX.md)**.
+
+---
+
+## Project layout
+
+- `public/models/sedan_animated_gray.glb` — the rigged model (see `CLAUDE.md` for the rig contract).
+- `reference/sedan_demo_viewer.html` — the single-file behavior reference (the app is ported from it).
+- `src/state/` — `vehicleState` (store), `vehicleCommands` (command vocabulary), `autoResolve` (auto rules), `musicStore`.
+- `src/agent/` — `toolbox` (tool registry), `agentRuntime` (`window.LiquidCar`), `agentStore` + `scripts` (chat).
+- `src/viewer/` — the r3f scene + per-effect hooks. `src/ui/` — the Tidal UI shell + agent panel.
+
+**`CLAUDE.md`** is the deep architecture / rig / effects reference — read it first for how
+the 3D behaviors bind to the GLB.
