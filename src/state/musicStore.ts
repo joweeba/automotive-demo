@@ -71,6 +71,11 @@ export function prevTrack() {
 }
 export const seek = (pos: number) =>
   set({ position: Math.max(0, Math.min(pos, TRACKS[state.index].duration)) });
+/** Jump directly to a track by index (used by the BMW renderer's media.track_index). */
+export const setTrack = (index: number) => {
+  const i = ((index % TRACKS.length) + TRACKS.length) % TRACKS.length;
+  if (i !== state.index) set({ index: i, position: 0 });
+};
 export const setVolume = (v: number) => set({ volume: Math.max(0, Math.min(100, v)) });
 
 export function useMusic<T>(selector: (s: MusicState) => T): T {

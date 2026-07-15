@@ -15,6 +15,14 @@ import {
   subscribeAgent,
 } from "./agentStore";
 import type { AgentPhase, AgentResponse, LogLevel } from "./agentStore";
+import {
+  ingest as bmwIngest,
+  connect as bmwConnect,
+  disconnect as bmwDisconnect,
+  reset as bmwReset,
+  getMirror as bmwGetMirror,
+  PROTOCOL_VERSION as BMW_PROTOCOL_VERSION,
+} from "./bmwRenderer";
 
 // ---------------------------------------------------------------------------
 // The public JS bridge the LLM assistant hooks into: window.LiquidCar.
@@ -25,7 +33,7 @@ import type { AgentPhase, AgentResponse, LogLevel } from "./agentStore";
 // in /AGENT_TOOLBOX.md.
 // ---------------------------------------------------------------------------
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 export interface LiquidCarAPI {
   version: string;
@@ -60,6 +68,31 @@ export interface LiquidCarAPI {
     /** Append a line to the in-panel console log. */
     log: (text: string, level?: LogLevel) => void;
     clearLog: () => void;
+  };
+
+  /**
+   * Renderer/consumer of the `bmw_emulator` NDJSON event stream (spec §4.5).
+   * The emulator grounds the model's commands and PUSHES state changes here; this
+   * reflects them in the 3D car. See ./bmwRenderer + AGENT_TOOLBOX.md.
+   */
+  render: {
+    /** NDJSON protocol version this consumer speaks (refuses others). */
+    protocolVersion: number;
+    /** Feed a raw NDJSON line / multi-line chunk, or a parsed event object. */
+    ingest: (data: string | object) => void;
+    /** Connect to an emulator NDJSON WebSocket bridge (auto-reconnects). */
+    connect: (url: string) => void;
+    /** Stop consuming and cancel reconnect. */
+    disconnect: () => void;
+    /** Clear the mirrored state (before reconnecting to a fresh emulator). */
+    reset: () => void;
+    /** Read-only copy of the mirrored flattened emulator state. */
+    getState: () => Record<string, string>;
+    /** Convenience typed entrypoints (wrap ingest with the v1 envelope). */
+    snapshot: (state: Record<string, string>) => void;
+    stateChange: (changes: { path: string; from?: string; to: string }[], summary?: string) => void;
+    animation: (evt: { target: string; action: string; detail?: string }) => void;
+    activation: (evt: { kind: string; detail?: string }) => void;
   };
 }
 
@@ -113,11 +146,32 @@ export function installAgentRuntime(): LiquidCarAPI | null {
       log: (text, level = "info") => pushConsole(level, text),
       clearLog: clearConsole,
     },
+
+    render: {
+      protocolVersion: BMW_PROTOCOL_VERSION,
+      ingest: bmwIngest,
+      connect: bmwConnect,
+      disconnect: bmwDisconnect,
+      reset: bmwReset,
+      getState: bmwGetMirror,
+      snapshot: (state) => bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "snapshot", state }),
+      stateChange: (changes, state_summary) =>
+        bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "state_change", changes, state_summary }),
+      animation: (evt) => bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "animation", ...evt }),
+      activation: (evt) => bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "activation", ...evt }),
+    },
   };
 
   (window as unknown as { LiquidCar: LiquidCarAPI }).LiquidCar = api;
   installed = api;
-  pushConsole("event", `LiquidCar runtime v${VERSION} ready · ${TOOLS.length} tools`);
+  pushConsole("event", `LiquidCar runtime v${VERSION} ready · ${TOOLS.length} tools · bmw renderer v${BMW_PROTOCOL_VERSION}`);
+  // Auto-connect to an emulator bridge if the page was opened with ?emulator=ws://…
+  try {
+    const url = new URLSearchParams(window.location.search).get("emulator");
+    if (url) bmwConnect(url);
+  } catch {
+    /* location unavailable — ignore */
+  }
   // Surface the current state getter for quick manual poking in devtools.
   void getAgentState;
   return api;
