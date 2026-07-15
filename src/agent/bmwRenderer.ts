@@ -1,0 +1,340 @@
+// ---------------------------------------------------------------------------
+// bmwRenderer — consume the `bmw_emulator` NDJSON renderer protocol and reflect
+// it in this web 3D view.
+//
+// Architecture (see docs/bmw-emulator.md, or Liquid4All/assistant):
+//
+//   model → function-call signature → the Rust emulator GROUNDS it → mutates its
+//   VehicleState → emits an NDJSON event stream → a RENDERER reflects it.
+//
+// The renderer is a *passive consumer*: it never executes tools. It mirrors the
+// emulator's flattened VehicleState and drives the local vehicleCommands + music
+// + voice-status UI so the car visibly tracks the emulator. This is the web
+// equivalent of the planned Unity renderer (spec §4, Phase 4b).
+//
+// Four event types (spec §4.5), envelope `{ v, event }`, v=1, all values are
+// JSON strings ("true"/"20"/"OPEN"):
+//   snapshot     — full flattened state, always the first line
+//   state_change — { changes:[{path,from,to}], state_summary }
+//   animation    — { target, action, detail }  (physical actuation cue)
+//   activation   — { kind, detail }             (VAD / wake / endpoint)
+//
+// This web sedan rig models a SUBSET of what a 3-series tracks. Mapped paths
+// drive the car; everything else (windows, sunroof, ambient color, drive mode,
+// nav, apps, comms) is surfaced in the in-panel console — nothing is silently
+// dropped. See the mapping table in AGENT_TOOLBOX.md.
+// ---------------------------------------------------------------------------
+
+import {
+  setClimate,
+  setTemperature,
+  setFan,
+  setSeatHeat,
+  setHeadlights,
+  setTaillights,
+  setExternalTemp,
+} from "../state/vehicleCommands";
+import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
+import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
+import { setPhase, setTranscript, pushConsole } from "./agentStore";
+
+export const PROTOCOL_VERSION = 1;
+
+/** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
+const HEAT_INFER_F = 74;
+
+// The emulator's 14-zone enum → this rig's three seat anchors (driver/passenger/rear).
+const ZONE_TO_SEAT: Record<string, SeatId> = {
+  DRIVER: "driver",
+  FRONT_LEFT: "driver",
+  PASSENGER: "passenger",
+  FRONT_RIGHT: "passenger",
+  REAR_LEFT: "rear",
+  REAR_RIGHT: "rear",
+  REAR_CENTER: "rear",
+  THIRD_ROW: "rear",
+  BACK: "rear",
+};
+
+// ── the mirror ──────────────────────────────────────────────────────────────
+// A local copy of the emulator's flattened state (canonical VehicleState::flatten
+// paths → string values). Reconciled into vehicleCommands on every event.
+let mirror: Record<string, string> = {};
+
+// ── value parsing ───────────────────────────────────────────────────────────
+const truthy = (v?: string) =>
+  v === "true" || v === "on" || v === "ON" || v === "1";
+
+function seatLevel(v?: string): SeatLevel {
+  switch ((v ?? "").toUpperCase()) {
+    case "LOW":
+      return 1;
+    case "MED":
+    case "MEDIUM":
+      return 2;
+    case "HIGH":
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+/** Parse a temperature string to °F. Handles "21", "21C", "70F", "20.5".
+ *  A bare value ≤ 40 is assumed Celsius (a cabin/ambient temp in °F never is). */
+function parseTempF(raw?: string): number | null {
+  if (raw == null) return null;
+  const m = /(-?\d+(?:\.\d+)?)\s*([CF])?/i.exec(raw);
+  if (!m) return null;
+  let n = parseFloat(m[1]);
+  const unit = m[2]?.toUpperCase();
+  if (unit === "C" || (!unit && n <= 40)) n = (n * 9) / 5 + 32;
+  return n;
+}
+
+/** First present value across a subsystem's preferred zones, else any zone, else the bare key. */
+function firstZone(prefix: string, zones: string[]): string | undefined {
+  for (const z of zones) {
+    const v = mirror[`${prefix}.${z}`];
+    if (v !== undefined) return v;
+  }
+  const k = Object.keys(mirror).find((p) => p.startsWith(`${prefix}.`));
+  return k ? mirror[k] : mirror[prefix];
+}
+
+/** True if the bare key or any per-zone key under `prefix` satisfies `pred`. */
+function anyZone(prefix: string, pred: (v: string) => boolean): boolean {
+  return Object.entries(mirror).some(
+    ([p, v]) => (p === prefix || p.startsWith(`${prefix}.`)) && pred(v),
+  );
+}
+
+// ── subsystem appliers (read the whole mirror, idempotent) ──────────────────
+
+function applyClimate(): void {
+  const tF = parseTempF(firstZone("climate.temperature", ["DRIVER", "ALL_CAR", "FRONT", "PASSENGER"]));
+  if (tF != null) setTemperature(Math.round(tF));
+
+  setFan(anyZone("climate.fan_speed", (v) => v !== "OFF" && v !== "0" && v !== ""));
+
+  // Glow: BMW expresses heating via temperature (there is no "heat" mode intent),
+  // so infer heat from a warm setpoint vs. the outside temp when AC/auto are off.
+  const acOn = anyZone("climate.ac", truthy) || anyZone("climate.max_ac", truthy);
+  const autoOn = anyZone("climate.climate_auto", truthy);
+  const extF = parseTempF(mirror["info.exterior_temp"]);
+  let mode: Climate = "off";
+  if (acOn) mode = "ac";
+  else if (autoOn) mode = "auto";
+  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= HEAT_INFER_F)) mode = "heat";
+  setClimate(mode);
+
+  // Seat heating: aggregate the mapped zones to the three seat anchors (take the max).
+  const acc: Record<SeatId, SeatLevel> = { driver: 0, passenger: 0, rear: 0 };
+  for (const [path, val] of Object.entries(mirror)) {
+    if (!path.startsWith("climate.seat_heating.")) continue;
+    const seat = ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)];
+    if (seat) acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
+  }
+  (Object.keys(acc) as SeatId[]).forEach((seat) => setSeatHeat(seat, acc[seat]));
+}
+
+function applyLighting(): void {
+  // DRIVING = low/driving beam, DAYTIME = DRLs. BMW has no separate taillight or fog
+  // intent, so taillights mirror the headlights (as autoResolve does) and fog is untouched.
+  const on = truthy(mirror["lighting.light.DRIVING"]) || truthy(mirror["lighting.light.DAYTIME"]);
+  setHeadlights(on ? "on" : "off");
+  setTaillights(on ? "on" : "off");
+}
+
+function applyMedia(): void {
+  const muted = truthy(mirror["media.muted"]);
+  const volRaw = mirror["media.volume"];
+  if (volRaw !== undefined) {
+    const v = Math.round(Number(volRaw));
+    if (!Number.isNaN(v)) setVolume(muted ? 0 : v);
+  } else if (muted) {
+    setVolume(0);
+  }
+  // media_play sets a source → treat as "playing".
+  if (mirror["media.source"] && !getMusic().playing) togglePlay();
+  const idx = mirror["media.track_index"];
+  if (idx !== undefined && !Number.isNaN(Number(idx))) setTrack(Number(idx) % TRACKS.length);
+}
+
+function applyEnvironment(): void {
+  const extF = parseTempF(mirror["info.exterior_temp"]);
+  if (extF != null) setExternalTemp(Math.round(extF));
+  // info.DATE / info.TIME / nav.gps are environmental truth; the web demo's Auto rules
+  // run off the device clock, so we mirror but don't act on them.
+}
+
+// ── event dispatch ──────────────────────────────────────────────────────────
+
+function reconcile(paths: string[]): void {
+  const subs = new Set(paths.map((p) => p.split(".")[0]));
+  if (subs.has("climate")) applyClimate();
+  if (subs.has("lighting")) applyLighting();
+  if (subs.has("media")) applyMedia();
+  if (subs.has("info") || subs.has("nav") || subs.has("system")) applyEnvironment();
+  // Subsystems the web rig can't show yet — surface, don't drop (spec: no silent truncation).
+  for (const p of paths) {
+    const top = p.split(".")[0];
+    if (top === "body" || top === "drive" || top === "apps" || top === "comms")
+      pushConsole("info", `bmw: ${p}=${mirror[p]} (no web rig mapping)`);
+  }
+}
+
+function onSnapshot(state: Record<string, string>): void {
+  mirror = { ...state };
+  pushConsole("event", `bmw ⬒ snapshot — ${Object.keys(mirror).length} state paths`);
+  applyClimate();
+  applyLighting();
+  applyMedia();
+  applyEnvironment();
+}
+
+interface Change {
+  path: string;
+  from?: string;
+  to: string;
+}
+
+function onStateChange(changes: Change[]): void {
+  const paths: string[] = [];
+  for (const c of changes) {
+    if (!c || typeof c.path !== "string") continue;
+    mirror[c.path] = c.to;
+    paths.push(c.path);
+    pushConsole("tool", `bmw Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
+  }
+  reconcile(paths);
+}
+
+function onAnimation(evt: { target?: string; action?: string; detail?: string }): void {
+  // The physical-actuation cue for the turn's command; the visual change already
+  // arrived via state_change, so we log it as a trace marker.
+  const parts = [evt.target, evt.action].filter(Boolean).join(".");
+  pushConsole("event", `bmw ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
+}
+
+function onActivation(evt: { kind?: string; detail?: string }): void {
+  const kind = String(evt.kind ?? "").toLowerCase();
+  const detail = evt.detail ? String(evt.detail) : "";
+  pushConsole("event", `bmw ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
+  if (/wake/.test(kind)) setPhase("wake");
+  else if (/vad|voice|speech|activity/.test(kind)) {
+    if (detail) setTranscript(detail);
+    setPhase("voice");
+  } else if (/asr|transcript/.test(kind)) {
+    if (detail) setTranscript(detail);
+    setPhase("processing");
+  } else if (/endpoint|end/.test(kind)) setPhase("processing");
+  else if (/idle|reset|done|silence/.test(kind)) setPhase("idle");
+}
+
+function dispatch(evt: unknown): void {
+  if (evt == null || typeof evt !== "object") return;
+  const e = evt as Record<string, unknown>;
+  if (e.v !== undefined && e.v !== PROTOCOL_VERSION) {
+    pushConsole("error", `bmw: refusing unknown protocol v=${String(e.v)} (support v=${PROTOCOL_VERSION})`);
+    return;
+  }
+  switch (e.event) {
+    case "snapshot":
+      return onSnapshot((e.state as Record<string, string>) ?? {});
+    case "state_change":
+      return onStateChange((e.changes as Change[]) ?? []);
+    case "animation":
+      return onAnimation(e as { target?: string; action?: string; detail?: string });
+    case "activation":
+      return onActivation(e as { kind?: string; detail?: string });
+    default:
+      pushConsole("event", `bmw: ignored event "${String(e.event)}"`);
+  }
+}
+
+/** Feed NDJSON into the renderer: a raw line (or multi-line chunk), or a parsed event object. */
+export function ingest(data: string | object): void {
+  if (typeof data !== "string") return dispatch(data);
+  for (const line of data.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t[0] !== "{") continue; // protocol lines start at column 0 with '{' (spec §4.5)
+    try {
+      dispatch(JSON.parse(t));
+    } catch {
+      pushConsole("error", `bmw: unparseable line: ${t.slice(0, 80)}`);
+    }
+  }
+}
+
+/** Current mirror of the emulator's flattened state (read-only copy, for debugging). */
+export function getMirror(): Record<string, string> {
+  return { ...mirror };
+}
+
+/** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
+export function reset(): void {
+  mirror = {};
+}
+
+// ── WebSocket transport ─────────────────────────────────────────────────────
+// The emulator's NDJSON sink is stdout today / a socket later (spec §4.5); a tiny
+// bridge (or the socket transport) forwards those lines to this WebSocket. Every
+// message may carry one or many `\n`-delimited protocol lines.
+
+let socket: WebSocket | null = null;
+let wantUrl: string | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function openSocket(): void {
+  if (!wantUrl || typeof WebSocket === "undefined") return;
+  try {
+    socket = new WebSocket(wantUrl);
+  } catch (err) {
+    pushConsole("error", `bmw: WebSocket failed: ${String(err)}`);
+    scheduleReconnect();
+    return;
+  }
+  pushConsole("event", `bmw: connecting to ${wantUrl}…`);
+  socket.onopen = () => pushConsole("event", `bmw: connected ${wantUrl}`);
+  socket.onmessage = (ev) => {
+    if (typeof ev.data === "string") ingest(ev.data);
+  };
+  socket.onerror = () => pushConsole("error", "bmw: socket error");
+  socket.onclose = () => {
+    socket = null;
+    if (wantUrl) {
+      pushConsole("event", "bmw: disconnected — retrying");
+      scheduleReconnect();
+    }
+  };
+}
+
+function scheduleReconnect(): void {
+  if (!wantUrl || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (wantUrl) openSocket();
+  }, 2000);
+}
+
+/** Connect to an emulator NDJSON WebSocket bridge; auto-reconnects until disconnect(). */
+export function connect(url: string): void {
+  disconnect();
+  wantUrl = url;
+  openSocket();
+}
+
+/** Stop consuming and cancel any reconnect. */
+export function disconnect(): void {
+  wantUrl = null;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = null;
+    pushConsole("event", "bmw: renderer disconnected");
+  }
+}

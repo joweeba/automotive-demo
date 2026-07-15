@@ -13,17 +13,32 @@ LLM assistant to the car. It has three parts:
 Everything is available synchronously once the app has mounted:
 
 ```js
-window.LiquidCar.version          // "1.0.0"
+window.LiquidCar.version          // "1.1.0"
 window.LiquidCar.tools            // tool manifest (array)
 window.LiquidCar.invoke(name,args)// run a tool → confirmation string
 window.LiquidCar.getState()       // read-only snapshot
 window.LiquidCar.subscribe(cb)    // → unsubscribe()
 window.LiquidCar.chat             // { open, close, userMessage, respond, setTranscript }
 window.LiquidCar.agent            // { setPhase, muteMic, unmuteMic, setMicMuted, log, clearLog }
+window.LiquidCar.render           // consume the bmw_emulator NDJSON stream (see §5)
 ```
 
 > The tools ARE the trigger vocabulary — the same named commands the sidebar UI calls, so
 > the car reacts identically whether a knob or the assistant drives it.
+
+### Two ways to drive the car
+
+There are two integration models, and you pick based on where the vehicle state lives:
+
+1. **Direct tool-calling** (§1) — *this web app owns the state.* Your model calls
+   `LiquidCar.invoke(tool, args)` and the car mutates. Best for a standalone browser demo
+   with no emulator.
+2. **NDJSON renderer** (§5) — *the [`bmw_emulator`](https://github.com/Liquid4All/assistant/blob/main/docs/bmw-emulator.md)
+   owns the state.* The emulator grounds the model's `bmw_new` commands, mutates **its**
+   `VehicleState`, and **pushes** state-change events; this app is a passive **renderer**
+   that reflects them (the web equivalent of the planned Unity renderer). Use this when the
+   assistant is wired to the real emulator. In this mode you don't call `invoke` — the
+   emulator does the grounding and the car just tracks the stream.
 
 ---
 
@@ -205,3 +220,92 @@ LC.chat.respond({
 });
 LC.agent.setPhase("idle");
 ```
+
+---
+
+## 5. BMW emulator renderer (`LiquidCar.render`)
+
+When the assistant is wired to the [`bmw_emulator`](https://github.com/Liquid4All/assistant/blob/main/docs/bmw-emulator.md),
+the emulator is the source of truth: it validates the model's `bmw_new` signature, grounds
+it into a `StateDelta`, mutates its own `VehicleState`, and emits the **NDJSON renderer
+protocol** (spec §4.5). This app **consumes** that stream and reflects it in the 3D car —
+it's the web sibling of the Unity renderer. You feed the stream in; you do **not** call
+`invoke`.
+
+### Connecting
+
+```js
+// A) Live: connect to a WebSocket bridge that forwards the emulator's NDJSON sink.
+LiquidCar.render.connect("ws://localhost:8787");   // auto-reconnects until disconnect()
+LiquidCar.render.disconnect();
+
+// A') Or open the page with a query param — it auto-connects on mount:
+//     http://localhost:5173/?emulator=ws://localhost:8787
+
+// B) Transport-agnostic: feed lines yourself (from a WS, SSE, postMessage, a file replay…).
+//    Accepts a raw NDJSON line, a multi-line chunk, or an already-parsed event object.
+LiquidCar.render.ingest('{"v":1,"event":"state_change","changes":[{"path":"media.volume","from":"20","to":"45"}]}');
+
+// C) Typed convenience wrappers (build the v1 envelope for you):
+LiquidCar.render.snapshot({ "climate.temperature.DRIVER": "21", "media.volume": "20" });
+LiquidCar.render.stateChange([{ path: "climate.seat_heating.REAR_LEFT", from: "OFF", to: "HIGH" }]);
+LiquidCar.render.animation({ target: "window", action: "OPEN", detail: "DRIVER" });
+LiquidCar.render.activation({ kind: "wake_word", detail: "hey bmw" });
+
+LiquidCar.render.getState();          // read-only copy of the mirrored flattened state
+LiquidCar.render.protocolVersion;     // 1 (refuses events with any other `v`)
+```
+
+> The emulator's stdout mixes human output with protocol lines; the bridge should forward
+> only lines that start with `{` (per spec §4.5). `ingest` also filters defensively.
+
+### The four events (spec §4.5)
+
+| event | handled by the renderer |
+|---|---|
+| `snapshot` | replaces the mirror with the full flattened state, then reflects it. Always the stream's first line. |
+| `state_change` | applies each `{path, from, to}` to the mirror, re-derives the affected subsystems, logs each delta. Empty deltas are suppressed upstream. |
+| `animation` | logged as a trace marker (the visual change already arrived via `state_change`). |
+| `activation` | drives the voice-status modal: `wake*`→wake, `vad/voice/speech`→voice (+transcript), `asr/transcript`→processing (+transcript), `endpoint`→processing, `idle/reset/silence`→idle. |
+
+### State-path → 3D mapping
+
+The web sedan rig models a **subset** of what a 3-series tracks. Mapped paths drive the car;
+everything else is surfaced in the in-panel **console** (`… (no web rig mapping)`) — nothing
+is silently dropped. Values arrive as strings; temperatures auto-convert (a bare value ≤ 40
+or a `…C` suffix is treated as Celsius → °F). Zones collapse to three seat anchors
+(`DRIVER/FRONT_LEFT`→driver, `PASSENGER/FRONT_RIGHT`→passenger, `REAR_*/THIRD_ROW/BACK`→rear).
+
+| BMW flattened path | → web effect |
+|---|---|
+| `climate.temperature.<zone>` | cabin temperature (°F; prefers `DRIVER`) |
+| `climate.ac.<zone>` / `climate.max_ac.<zone>` | climate glow → **AC** (blue) |
+| `climate.climate_auto.<zone>` | climate mode → **auto** |
+| `climate.fan_speed.<zone>` | **fan** on when any zone ≠ `OFF`/`0` (drives the wind wash) |
+| `climate.seat_heating.<zone>` | seat-heat sprite `OFF/LOW/MED/HIGH` → level `0/1/2/3` (max across mapped zones) |
+| `lighting.light.DRIVING` / `.DAYTIME` | head + tail light beams + emissive lamps |
+| `media.volume` / `media.muted` | player volume (mute → 0) |
+| `media.source` | sets the player "playing" |
+| `media.track_index` | selects the track (mod playlist length) |
+| `info.exterior_temp` | outside temperature (drives the Auto rules) |
+
+**Inferred:** the `bmw_new` vocabulary has **no "heat" mode** (heating is expressed via a
+warmer temperature setpoint), so the red **heat** glow is inferred when AC/auto are off and
+the cabin target is above the outside temp (or ≥ 74 °F). Tune `HEAT_INFER_F` in
+`src/agent/bmwRenderer.ts`.
+
+**Not yet mapped** (logged, not shown): windows/sunroof/blinds/mirrors (`body.*`), ambient
+color & non-driving light types (`lighting.*`), drive mode/parking/ACC (`drive.*`),
+navigation (`nav.*`), apps (`apps.*`), comms (`comms.*`), seat cooling, steering-wheel heat,
+massage, defrost, recirculation, climate sync. The rig has a couple of extras the BMW
+vocabulary doesn't command (trunk/frunk/wipers) — harmless; they stay UI/demo-only.
+
+### Example — a grounded "keep the kids warm" turn
+
+```
+{"v":1,"event":"snapshot","state":{"climate.temperature.DRIVER":"21","climate.seat_heating.REAR_LEFT":"OFF","info.exterior_temp":"14","media.volume":"20", …}}
+{"v":1,"event":"state_change","changes":[{"path":"climate.temperature.DRIVER","from":"21","to":"24"},{"path":"climate.seat_heating.REAR_LEFT","from":"OFF","to":"HIGH"}],"state_summary":"temp[DRIVER]=24C | seat_heat[REAR_LEFT]=HIGH"}
+{"v":1,"event":"animation","target":"seat_heating","action":"HIGH","detail":"REAR_LEFT"}
+```
+
+→ cabin warms to 75 °F, the heat glow turns on, and the rear seat-heat sprite goes to level 3.

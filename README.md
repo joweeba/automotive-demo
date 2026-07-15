@@ -55,7 +55,7 @@ Your LLM ─────────┘        ▲
 ### The bridge at a glance
 
 ```js
-window.LiquidCar.version                       // "1.0.0"
+window.LiquidCar.version                       // "1.1.0"
 window.LiquidCar.tools                          // [{ name, description, parameters }, …] — 20 tools
 window.LiquidCar.invoke("setClimateMode", { mode: "heat" })  // → "Climate set to heat."
 window.LiquidCar.getState()                     // read-only snapshot (incl. resolved 'auto' values)
@@ -63,7 +63,28 @@ window.LiquidCar.subscribe(cb)                  // → unsubscribe()
 
 window.LiquidCar.chat.{ open, close, userMessage, respond, setTranscript }
 window.LiquidCar.agent.{ setPhase, muteMic, unmuteMic, setMicMuted, log, clearLog }
+window.LiquidCar.render.{ connect, ingest, snapshot, stateChange, animation, activation }  // ← BMW emulator
 ```
+
+### Two integration models
+
+Pick based on **where the vehicle state lives**:
+
+- **Direct tool-calling** — this app owns the state; your model calls `invoke(tool, args)`
+  and the car mutates. Best for a standalone browser demo. (The rest of this section.)
+- **BMW emulator renderer** — the [`bmw_emulator`](https://github.com/Liquid4All/assistant/blob/main/docs/bmw-emulator.md)
+  owns the state: it grounds the model's `bmw_new` commands, mutates **its** `VehicleState`,
+  and **pushes** the NDJSON event stream (`snapshot`/`state_change`/`animation`/`activation`,
+  spec §4.5). This app is a passive **renderer** of that stream — the web equivalent of the
+  planned Unity renderer. You don't call `invoke`; you feed the stream:
+
+  ```js
+  window.LiquidCar.render.connect("ws://localhost:8787");   // a bridge forwarding the emulator's NDJSON sink
+  // …or open the page with ?emulator=ws://localhost:8787 to auto-connect.
+  ```
+
+  Full event handling, the BMW-path→3D mapping table, and the Celsius/zone handling are in
+  [`AGENT_TOOLBOX.md` §5](./AGENT_TOOLBOX.md#5-bmw-emulator-renderer-liquidcarrender).
 
 ### Wiring it to a model (tool-calling loop)
 
