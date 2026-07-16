@@ -13,6 +13,10 @@
 // resulting state into agentStore.
 // ---------------------------------------------------------------------------
 
+/** A sensible default emulator bridge URL, offered in the connect field so the
+ *  user is never silently disconnected with no obvious way to connect. */
+export const DEFAULT_EMULATOR_URL = "ws://localhost:8787";
+
 /** The five observable connection states surfaced to the UI. */
 export type ConnectionState =
   | "disconnected" // no socket, and we are not trying to open one

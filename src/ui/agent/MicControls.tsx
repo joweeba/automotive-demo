@@ -20,7 +20,15 @@ export function MicControls() {
   const streaming = useAgent((s) => s.micStreaming);
   const ptt = useAgent((s) => s.pttActive);
   const permission = useAgent((s) => s.micPermission);
+  const connection = useAgent((s) => s.connection);
   const denied = permission === "denied" || permission === "error";
+
+  // The core UX fix: the mic can ONLY stream into an OPEN socket. When we are not
+  // connected, disable BOTH controls so it is impossible to send into a closed
+  // socket (the old silent failure). A visible reason explains why.
+  const connected = connection === "connected";
+  const disabled = !connected;
+  const disabledCls = disabled ? "cursor-not-allowed opacity-40" : "";
 
   return (
     <div className="flex flex-col gap-2">
@@ -29,13 +37,15 @@ export function MicControls() {
         <button
           type="button"
           onClick={toggleContinuousMic}
+          disabled={disabled}
           aria-pressed={streaming}
+          aria-disabled={disabled}
           aria-label={streaming ? "Stop continuous microphone" : "Start continuous microphone"}
           className={`flex flex-1 items-center justify-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
             streaming
               ? "border-transparent bg-[var(--agent-accent)] text-white"
               : "border-input bg-secondary text-foreground hover:bg-secondary/80"
-          }`}
+          } ${disabledCls}`}
         >
           {streaming ? (
             <span className="mic-rec-dot inline-block h-2.5 w-2.5 rounded-full bg-white" aria-hidden />
@@ -50,7 +60,10 @@ export function MicControls() {
           type="button"
           aria-label="Push to talk (hold)"
           aria-pressed={ptt}
+          aria-disabled={disabled}
+          disabled={disabled}
           onPointerDown={(e) => {
+            if (disabled) return; // not connected — do nothing (button is also disabled)
             // Capture so pointerup fires here even if released outside the button.
             e.currentTarget.setPointerCapture?.(e.pointerId);
             void pttDown();
@@ -66,12 +79,20 @@ export function MicControls() {
             ptt
               ? "border-transparent bg-status-error text-white"
               : "border-input bg-secondary text-foreground hover:bg-secondary/80"
-          }`}
+          } ${disabledCls}`}
         >
           <Mic size={16} />
           {ptt ? "Release to send" : "Hold to talk"}
         </button>
       </div>
+
+      {/* Not-connected reason — makes the disabled state understandable. */}
+      {disabled && (
+        <div className="flex items-center gap-2 rounded-md bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+          <MicOff size={14} />
+          Not connected — connect to an emulator to stream the microphone.
+        </div>
+      )}
 
       {denied && (
         <div className="flex items-center gap-2 rounded-md bg-status-error/10 px-3 py-2 text-xs text-status-error">
