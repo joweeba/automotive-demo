@@ -87,6 +87,24 @@ describe("connection FSM (via the socket lifecycle)", () => {
     // disconnect() nulls onclose, so even a late close can't resurrect us.
     expect(getConnectionState()).toBe("disconnected");
   });
+
+  it("a WebSocket construction throw surfaces (console.error) → reconnecting", () => {
+    vi.useFakeTimers();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const OrigCtor = (globalThis as { WebSocket?: unknown }).WebSocket;
+    class ThrowingWs {
+      static OPEN = 1;
+      constructor() {
+        throw new Error("bad url");
+      }
+    }
+    (globalThis as { WebSocket?: unknown }).WebSocket = ThrowingWs;
+    connect("ws://bad");
+    expect(err).toHaveBeenCalled();
+    expect(getConnectionState()).toBe("reconnecting");
+    (globalThis as { WebSocket?: unknown }).WebSocket = OrigCtor;
+    vi.useRealTimers();
+  });
 });
 
 // ── sendControl ──────────────────────────────────────────────────────────────

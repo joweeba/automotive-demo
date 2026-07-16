@@ -538,6 +538,9 @@ function openSocket(): void {
     return;
   }
   const url = wantUrl;
+  // Enter "connecting" FIRST so a construction failure below can transition to
+  // error/reconnecting (the FSM ignores error/close while "disconnected").
+  transition("connect", `Connecting to ${url}…`);
   try {
     socket = new WebSocket(url);
   } catch (err) {
@@ -548,7 +551,6 @@ function openSocket(): void {
     transition("close"); // no live socket → we're now reconnecting
     return;
   }
-  transition("connect", `Connecting to ${url}…`);
   console.info(`[bmw] WebSocket connecting to ${url}…`);
   pushConsole("event", `bmw: connecting to ${url}…`);
   socket.onopen = () => {
