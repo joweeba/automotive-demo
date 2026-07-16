@@ -315,14 +315,16 @@ export function setConnection(
   set(patch);
 }
 
-/** Increment the count of audio frames dropped because the socket was not open. */
-export function noteAudioDropped(n = 1): void {
-  set({ audioDropped: state.audioDropped + n });
+/** Set the count of audio frames dropped because the socket was not open. Absolute
+ *  (not incremental) and no-ops when unchanged, so the high-rate audio path can
+ *  update it on a throttle without spurious re-renders. */
+export function setAudioDropped(n: number): void {
+  if (state.audioDropped !== n) set({ audioDropped: n });
 }
 
 /** Reset the dropped-audio counter (e.g. when a fresh stream starts). */
 export function resetAudioDropped(): void {
-  if (state.audioDropped !== 0) set({ audioDropped: 0 });
+  setAudioDropped(0);
 }
 
 export function toggleConsole(): void {

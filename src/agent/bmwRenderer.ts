@@ -42,7 +42,7 @@ import {
   setTranscript,
   pushConsole,
   setConnection,
-  noteAudioDropped,
+  setAudioDropped,
   resetAudioDropped,
   type LogLevel,
 } from "./agentStore";
@@ -452,14 +452,17 @@ export function sendAudio(pcm16: Int16Array): void {
     return;
   }
   if (!socketOpen()) {
-    // Audio frames are high-rate; log the FIRST drop loudly and then throttle, but
-    // ALWAYS reflect the running drop count in state/UI so the drop is never silent.
+    // Audio frames are high-rate; count every drop (cheap module int) but only
+    // surface — console.warn + the agentStore count that drives a re-render — on a
+    // throttle (first + every 50th). This keeps the drop visible (never silent)
+    // WITHOUT a re-render storm while a dead stream keeps producing frames.
     droppedAudioFrames++;
-    noteAudioDropped(1);
-    if (droppedAudioFrames === 1 || droppedAudioFrames % 50 === 0)
+    if (droppedAudioFrames === 1 || droppedAudioFrames % 50 === 0) {
       console.warn(
         `[bmw] audio frame dropped — WebSocket not open (dropped ${droppedAudioFrames}, readyState=${socket?.readyState ?? "null"})`,
       );
+      setAudioDropped(droppedAudioFrames);
+    }
     return;
   }
   try {
@@ -544,11 +547,15 @@ function openSocket(): void {
   try {
     socket = new WebSocket(url);
   } catch (err) {
+    // A SYNCHRONOUS throw from `new WebSocket(url)` means a malformed URL/scheme —
+    // that will never succeed, so do NOT enter the auto-reconnect loop (which would
+    // pin the UI at "Reconnecting…" forever). Surface a TERMINAL error and stop
+    // wanting this URL, so the connect field reappears for the user to correct it.
     console.error(`[bmw] WebSocket construction failed for ${url}:`, err);
-    pushConsole("error", `bmw: WebSocket failed: ${String(err)}`);
-    transition("error", `WebSocket failed: ${String(err)}`);
-    scheduleReconnect();
-    transition("close"); // no live socket → we're now reconnecting
+    pushConsole("error", `bmw: WebSocket failed (bad URL?): ${String(err)}`);
+    socket = null;
+    wantUrl = null;
+    transition("error", `Invalid emulator URL: ${url}`);
     return;
   }
   console.info(`[bmw] WebSocket connecting to ${url}…`);

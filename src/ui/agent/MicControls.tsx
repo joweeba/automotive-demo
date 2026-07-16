@@ -1,5 +1,6 @@
 import { useAgent } from "../../agent/agentStore";
 import { toggleContinuousMic, pttDown, pttUp } from "../../agent/micStreaming";
+import { isSendable } from "../../agent/connection";
 import { Mic, MicOff } from "../icons";
 
 // ---------------------------------------------------------------------------
@@ -23,12 +24,16 @@ export function MicControls() {
   const connection = useAgent((s) => s.connection);
   const denied = permission === "denied" || permission === "error";
 
-  // The core UX fix: the mic can ONLY stream into an OPEN socket. When we are not
-  // connected, disable BOTH controls so it is impossible to send into a closed
-  // socket (the old silent failure). A visible reason explains why.
-  const connected = connection === "connected";
-  const disabled = !connected;
-  const disabledCls = disabled ? "cursor-not-allowed opacity-40" : "";
+  // The core UX fix: the mic can ONLY *start* streaming into an OPEN socket. When
+  // not connected, disable STARTING a stream so it is impossible to send into a
+  // closed socket (the old silent failure). But NEVER disable a control that is
+  // currently active — otherwise a mid-stream disconnect would remove the "off"
+  // affordance and trap the live mic on (a stuck-state + privacy bug). So an
+  // active toggle / held PTT stays operable so the user can always stop it.
+  const connected = isSendable(connection);
+  const toggleDisabled = !connected && !streaming;
+  const pttDisabled = !connected && !ptt;
+  const cls = (d: boolean) => (d ? "cursor-not-allowed opacity-40" : "");
 
   return (
     <div className="flex flex-col gap-2">
@@ -37,15 +42,15 @@ export function MicControls() {
         <button
           type="button"
           onClick={toggleContinuousMic}
-          disabled={disabled}
+          disabled={toggleDisabled}
           aria-pressed={streaming}
-          aria-disabled={disabled}
+          aria-disabled={toggleDisabled}
           aria-label={streaming ? "Stop continuous microphone" : "Start continuous microphone"}
           className={`flex flex-1 items-center justify-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
             streaming
               ? "border-transparent bg-[var(--agent-accent)] text-white"
               : "border-input bg-secondary text-foreground hover:bg-secondary/80"
-          } ${disabledCls}`}
+          } ${cls(toggleDisabled)}`}
         >
           {streaming ? (
             <span className="mic-rec-dot inline-block h-2.5 w-2.5 rounded-full bg-white" aria-hidden />
@@ -60,10 +65,10 @@ export function MicControls() {
           type="button"
           aria-label="Push to talk (hold)"
           aria-pressed={ptt}
-          aria-disabled={disabled}
-          disabled={disabled}
+          aria-disabled={pttDisabled}
+          disabled={pttDisabled}
           onPointerDown={(e) => {
-            if (disabled) return; // not connected — do nothing (button is also disabled)
+            if (!connected) return; // can't START a stream when not connected
             // Capture so pointerup fires here even if released outside the button.
             e.currentTarget.setPointerCapture?.(e.pointerId);
             void pttDown();
@@ -79,18 +84,22 @@ export function MicControls() {
             ptt
               ? "border-transparent bg-status-error text-white"
               : "border-input bg-secondary text-foreground hover:bg-secondary/80"
-          } ${disabledCls}`}
+          } ${cls(pttDisabled)}`}
         >
           <Mic size={16} />
           {ptt ? "Release to send" : "Hold to talk"}
         </button>
       </div>
 
-      {/* Not-connected reason — makes the disabled state understandable. */}
-      {disabled && (
+      {/* Not-connected reason — makes the disabled state understandable. When a
+          stream is still active during a drop, the control stays enabled so it can
+          be stopped, and we say so. */}
+      {!connected && (
         <div className="flex items-center gap-2 rounded-md bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           <MicOff size={14} />
-          Not connected — connect to an emulator to stream the microphone.
+          {streaming || ptt
+            ? "Connection lost — audio isn't being sent. Stop to release the mic."
+            : "Not connected — connect to an emulator to stream the microphone."}
         </div>
       )}
 

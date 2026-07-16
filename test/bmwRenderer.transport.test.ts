@@ -88,7 +88,7 @@ describe("connection FSM (via the socket lifecycle)", () => {
     expect(getConnectionState()).toBe("disconnected");
   });
 
-  it("a WebSocket construction throw surfaces (console.error) → reconnecting", () => {
+  it("a WebSocket construction throw is TERMINAL (error), not an endless reconnect", () => {
     vi.useFakeTimers();
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const OrigCtor = (globalThis as { WebSocket?: unknown }).WebSocket;
@@ -99,9 +99,13 @@ describe("connection FSM (via the socket lifecycle)", () => {
       }
     }
     (globalThis as { WebSocket?: unknown }).WebSocket = ThrowingWs;
-    connect("ws://bad");
+    connect("http://bad-scheme");
     expect(err).toHaveBeenCalled();
-    expect(getConnectionState()).toBe("reconnecting");
+    // A malformed URL will never succeed → surface a terminal error, do NOT loop.
+    expect(getConnectionState()).toBe("error");
+    // No reconnect scheduled: advancing time does not re-attempt (no 2nd instance).
+    vi.advanceTimersByTime(10_000);
+    expect(MockWebSocket.instances).toHaveLength(0); // ThrowingWs isn't a MockWebSocket
     (globalThis as { WebSocket?: unknown }).WebSocket = OrigCtor;
     vi.useRealTimers();
   });
@@ -185,16 +189,26 @@ describe("sendAudio", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it("closed socket → drop is COUNTED + surfaced (console.warn + agentStore.audioDropped)", () => {
+  it("closed socket → EVERY drop counted; surfaced on a throttle (no re-render storm)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     // not connected
     sendAudio(new Int16Array([1, 2]));
     sendAudio(new Int16Array([3, 4]));
+    // exact count is always tracked in diagnostics…
     expect(getAudioDiagnostics().dropped).toBe(2);
-    expect(getAgentState().audioDropped).toBe(2);
-    // logs the FIRST drop loudly (throttled thereafter)
+    // …but the store (which drives re-renders) is updated only on the throttle
+    // boundary (first + every 50th), so it reflects the count at that boundary.
+    expect(getAgentState().audioDropped).toBe(1);
+    // FIRST drop surfaces loudly; the 2nd is throttled (not the 50th).
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain("dropped");
+  });
+
+  it("the store drop count updates again at the 50th dropped frame", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (let i = 0; i < 50; i++) sendAudio(new Int16Array([1, 2]));
+    expect(getAudioDiagnostics().dropped).toBe(50);
+    expect(getAgentState().audioDropped).toBe(50); // updated at the 50th
   });
 
   it("send-throw → console.error + counted, never an empty catch", () => {

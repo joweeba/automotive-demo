@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAgent } from "../../agent/agentStore";
 import { connect, disconnect } from "../../agent/bmwRenderer";
 import {
@@ -34,6 +34,13 @@ export function ConnectionStatus() {
   const audioDropped = useAgent((s) => s.audioDropped);
 
   const [url, setUrl] = useState(connectionUrl ?? DEFAULT_EMULATOR_URL);
+  // Keep the field in sync when the store URL changes (e.g. a ?emulator= auto-connect
+  // set it before this mounted) so a later Connect/Retry targets the RIGHT host, not
+  // the stale default. connectionUrl is null while disconnected, so this never
+  // clobbers what the user is typing into the connect field.
+  useEffect(() => {
+    if (connectionUrl) setUrl(connectionUrl);
+  }, [connectionUrl]);
   const tone = TONE[connection];
   const isConnected = connection === "connected";
   const busy = connection === "connecting" || connection === "reconnecting";
@@ -66,10 +73,12 @@ export function ConnectionStatus() {
         <p className="text-xs text-muted-foreground">{connectionReason}</p>
       )}
 
-      {/* Dropped-audio warning — the previously-silent failure, now visible. */}
-      {audioDropped > 0 && (
+      {/* Dropped-audio warning — the previously-silent failure, now visible. Only
+          while NOT connected, so it can't contradict a healthy connection after a
+          reconnect (the count clears on the next stream start). */}
+      {audioDropped > 0 && !isConnected && (
         <p className="text-xs text-status-warning">
-          {audioDropped} audio frame{audioDropped === 1 ? "" : "s"} dropped — not connected.
+          {audioDropped}+ audio frame{audioDropped === 1 ? "" : "s"} dropped — not connected.
         </p>
       )}
 

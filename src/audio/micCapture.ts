@@ -70,35 +70,30 @@ export interface CaptureEnv {
     options: { processorOptions: Record<string, unknown> },
   ) => CaptureNode;
   createObjectURL?: (blob: Blob) => string;
+  revokeObjectURL?: (url: string) => void;
 }
 
 /** Build the default env from the real browser + standardized-audio-context. */
 export function defaultCaptureEnv(): CaptureEnv {
   const hasNavigator =
     typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  // standardized-audio-context normalises AudioContext across browsers, but both
+  // exports are undefined in a non-Web-Audio env. Leave createContext/createNode
+  // UNDEFINED in that case so the startCapture() support guard maps it to an
+  // "unsupported" error BEFORE ever prompting for the mic.
+  const Ctx = AudioContext as unknown as (new () => CaptureContext) | undefined;
+  const Node = AudioWorkletNode as unknown as
+    | (new (ctx: unknown, name: string, options: unknown) => CaptureNode)
+    | undefined;
+  const hasObjectURL = typeof URL !== "undefined" && !!URL.createObjectURL;
   return {
     getUserMedia: hasNavigator
       ? (c) => navigator.mediaDevices.getUserMedia(c)
       : undefined,
-    // standardized-audio-context normalises AudioContext across browsers. Both
-    // exports can be undefined in a non-Web-Audio env; if so, createContext/
-    // createNode throw at start() and map to an "unsupported" MicCaptureException.
-    createContext: () => {
-      const Ctx = AudioContext as unknown as (new () => CaptureContext) | undefined;
-      if (!Ctx) throw new Error("AudioContext unavailable");
-      return new Ctx();
-    },
-    createNode: (ctx, name, options) => {
-      const Node = AudioWorkletNode as unknown as
-        | (new (ctx: unknown, name: string, options: unknown) => CaptureNode)
-        | undefined;
-      if (!Node) throw new Error("AudioWorkletNode unavailable");
-      return new Node(ctx, name, options);
-    },
-    createObjectURL:
-      typeof URL !== "undefined" && URL.createObjectURL
-        ? (blob) => URL.createObjectURL(blob)
-        : undefined,
+    createContext: Ctx ? () => new Ctx() : undefined,
+    createNode: Node ? (ctx, name, options) => new Node(ctx, name, options) : undefined,
+    createObjectURL: hasObjectURL ? (blob) => URL.createObjectURL(blob) : undefined,
+    revokeObjectURL: hasObjectURL ? (url) => URL.revokeObjectURL(url) : undefined,
   };
 }
 
@@ -130,7 +125,7 @@ export async function startCapture(
 ): Promise<void> {
   if (session) return; // already capturing (idempotent)
 
-  const { getUserMedia, createContext, createNode, createObjectURL } = env;
+  const { getUserMedia, createContext, createNode, createObjectURL, revokeObjectURL } = env;
   if (!getUserMedia || !createContext || !createNode || !createObjectURL) {
     throw new MicCaptureException(
       "unsupported",
@@ -165,7 +160,13 @@ export async function startCapture(
 
     const blob = new Blob([buildWorkletSource()], { type: "application/javascript" });
     const workletUrl = createObjectURL(blob);
-    await ctx.audioWorklet.addModule(workletUrl);
+    try {
+      await ctx.audioWorklet.addModule(workletUrl);
+    } finally {
+      // addModule has fetched the module by now; revoke so we don't leak one blob
+      // URL per start (mic toggle / every PTT press) for the page lifetime.
+      revokeObjectURL?.(workletUrl);
+    }
 
     const source = ctx.createMediaStreamSource(stream);
     const node = createNode(ctx, MIC_WORKLET_NAME, {

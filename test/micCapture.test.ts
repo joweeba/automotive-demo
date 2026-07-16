@@ -28,6 +28,8 @@ interface Harness {
   source: { connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> };
   track: { stop: ReturnType<typeof vi.fn> };
   getUserMedia: ReturnType<typeof vi.fn>;
+  createObjectURL: ReturnType<typeof vi.fn>;
+  revokeObjectURL: ReturnType<typeof vi.fn>;
 }
 
 /** Build a fully-working fake env; pass overrides to break specific pieces. */
@@ -51,11 +53,14 @@ function makeHarness(over: Partial<CaptureEnv> = {}): Harness {
     close: vi.fn(),
   };
   const getUserMedia = vi.fn(async () => stream);
+  const createObjectURL = vi.fn(() => "blob:mock-worklet");
+  const revokeObjectURL = vi.fn();
   const env: CaptureEnv = {
     getUserMedia,
     createContext: () => ctx as unknown as CaptureContext,
     createNode: () => node,
-    createObjectURL: () => "blob:mock-worklet",
+    createObjectURL,
+    revokeObjectURL,
     ...over,
   };
   return {
@@ -65,6 +70,8 @@ function makeHarness(over: Partial<CaptureEnv> = {}): Harness {
     source,
     track,
     getUserMedia,
+    createObjectURL,
+    revokeObjectURL,
   };
 }
 
@@ -119,6 +126,20 @@ describe("startCapture — graph wiring", () => {
     await startCapture(vi.fn(), h.env);
     await startCapture(vi.fn(), h.env);
     expect(h.getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes the worklet Blob URL after addModule (no per-start leak)", async () => {
+    const h = makeHarness();
+    await startCapture(vi.fn(), h.env);
+    expect(h.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(h.revokeObjectURL).toHaveBeenCalledWith("blob:mock-worklet");
+  });
+
+  it("revokes the Blob URL even when addModule fails (no leak on error)", async () => {
+    const h = makeHarness();
+    h.ctx.audioWorklet.addModule.mockRejectedValue(new Error("addModule failed"));
+    await expect(startCapture(vi.fn(), h.env)).rejects.toBeInstanceOf(MicCaptureException);
+    expect(h.revokeObjectURL).toHaveBeenCalledWith("blob:mock-worklet");
   });
 });
 
