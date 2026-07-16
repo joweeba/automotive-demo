@@ -3,3 +3,6 @@ dist/
 .DS_Store
 *.log
 *.tsbuildinfo
+
+# Emulator trace artifact written into cwd by the E2E harness's child process
+emulator-trace.jsonl

@@ -7,5 +7,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
+    // The LIVE cross-process E2E (test/e2e/**) needs the built Rust emulator binary and
+    // spawns a real process + WebSocket, so it is NOT part of the default `npm test`
+    // (unit + in-process regression). Run it with `npm run test:e2e` (see vitest.e2e.config.ts).
+    exclude: ["test/e2e/**", "node_modules/**"],
   },
 });

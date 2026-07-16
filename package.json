@@ -10,6 +10,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
     "test:integration": "vitest run test/bmwRenderer.integration.test.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest"
   },
   "dependencies": {
