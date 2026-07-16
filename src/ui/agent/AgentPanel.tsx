@@ -5,6 +5,7 @@ import { AgentMessages } from "./AgentMessages";
 import { AgentInput } from "./AgentInput";
 import { AgentStatus } from "./AgentStatus";
 import { AgentConsole } from "./AgentConsole";
+import { MicControls } from "./MicControls";
 
 /** A small header toggle button (mic mute / console). */
 function HeaderButton({
@@ -89,7 +90,8 @@ export function AgentPanel({ compact = false }: { compact?: boolean }) {
       <AgentConsole />
 
       {/* Composer */}
-      <div className="shrink-0 p-6">
+      <div className="flex shrink-0 flex-col gap-3 p-6">
+        <MicControls />
         <AgentInput />
       </div>
     </aside>

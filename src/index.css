@@ -132,6 +132,22 @@
   animation: agent-listen 1.8s ease-in-out infinite;
 }
 
+/* Recording indicator — pulsing dot while the real mic is streaming. */
+@keyframes mic-rec {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+.mic-rec-dot {
+  animation: mic-rec 1.1s ease-in-out infinite;
+}
+
 /* 4. App base. */
 html,
 body,
