@@ -85,6 +85,7 @@ export function useClimateEffects(scene: THREE.Object3D) {
           blending,
           depthWrite: false,
           side: THREE.DoubleSide,
+          toneMapped: false, // keep the tuned wash colors exact under ACES tone mapping
         }),
       ) as BasicMesh;
       m.rotation.x = -Math.PI / 2;
@@ -102,6 +103,7 @@ export function useClimateEffects(scene: THREE.Object3D) {
           opacity: 0,
           depthWrite: false,
           side: THREE.DoubleSide,
+          toneMapped: false, // keep the wind wash exact under ACES tone mapping
         }),
       ) as BasicMesh;
       m.rotation.x = -Math.PI / 2;

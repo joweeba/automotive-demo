@@ -15,6 +15,7 @@ import {
   IconArrowUp,
   IconWaveSine,
   IconCloudRain,
+  IconRoad,
   IconSun,
   IconMoon,
   IconLayoutSidebarRightCollapse,
@@ -44,6 +45,7 @@ export const SkipForward = tidalIcon(IconPlayerSkipForwardFilled);
 export const Volume = tidalIcon(IconVolume);
 export const VolumeLow = tidalIcon(IconVolume2);
 export const Camera = tidalIcon(IconVideo);
+export const Road = tidalIcon(IconRoad);
 export const Fan = tidalIcon(IconWind);
 export const Recirculate = tidalIcon(IconRefresh);
 export const Fog = tidalIcon(IconMist);

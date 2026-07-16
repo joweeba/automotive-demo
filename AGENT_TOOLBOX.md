@@ -61,6 +61,7 @@ LiquidCar.invoke("setClimateMode", { mode: "heat" });
 | Tool | Parameters | Notes |
 |---|---|---|
 | `setCameraView` | `view`: `threeq \| top \| side \| cabin` | 3D camera preset |
+| `setGround` | `surface`: `asphalt \| dirt \| marble \| concrete` | surface the car sits on; `marble` = polished/reflective |
 | `setClimateMode` | `mode`: `off \| auto \| ac \| heat` | `auto` resolves from outside temp vs cabin target |
 | `setCabinTemperature` | `fahrenheit`: number 60–85 | desired cabin target |
 | `adjustCabinTemperature` | `delta`: number | relative nudge (e.g. `-2`) |
@@ -107,6 +108,7 @@ returns a snapshot (values are the stored setting; `*Effective` fields are the r
 ```jsonc
 {
   "view": "threeq",
+  "ground": "asphalt",
   "environment": { "externalTemp": 72, "weather": "rain", "isNight": false },
   "interior": {
     "climate": "auto", "climateEffective": "ac",

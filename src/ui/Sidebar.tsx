@@ -5,6 +5,7 @@ import {
   WiperRow,
   AccessRows,
 } from "./sections/ExteriorSection";
+import { GroundRow } from "./sections/SceneSection";
 import { CameraViewRow } from "./CameraViewTabs";
 import { PANEL_STYLE } from "./panelStyle";
 
@@ -44,6 +45,7 @@ export function Sidebar({
         <>
           <Band>
             <CameraViewRow />
+            <GroundRow />
           </Band>
           <Divider />
         </>

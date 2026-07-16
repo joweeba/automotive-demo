@@ -13,6 +13,7 @@ import type {
   SeatId,
   SeatLevel,
   Weather,
+  GroundId,
 } from "./vehicleState";
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,11 @@ import type {
 
 export function setCameraView(view: CameraView): void {
   setState({ view });
+}
+
+/** Swap the surface the car is parked on (road / dirt / marble / concrete). */
+export function setGround(ground: GroundId): void {
+  setState({ ground });
 }
 
 // --- Environment (the outside world; drives every Auto setting) ---

@@ -2,6 +2,7 @@ import { useGLTF } from "@react-three/drei";
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import { useCarRig } from "./useCarRig";
+import { useCarRealism } from "./useCarRealism";
 import { useCabinReveal } from "./useCabinReveal";
 import { useClimateEffects } from "./useClimateEffects";
 import { useSeatIcons } from "./useSeatIcons";
@@ -43,6 +44,7 @@ export function Sedan({ onCenter }: { onCenter?: (center: THREE.Vector3) => void
   }, [scene]);
 
   useCarRig(scene);
+  useCarRealism(scene); // shadows + envMap on the real car meshes (skips FX overlays)
   useCabinReveal(scene);
   useClimateEffects(scene);
   useSeatIcons(scene);

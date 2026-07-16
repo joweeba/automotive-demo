@@ -55,7 +55,12 @@ export function useSeatIcons(scene: THREE.Object3D) {
       const c = new THREE.Box3().setFromObject(mesh).getCenter(new THREE.Vector3());
       const level = getState().seatHeat[id];
       const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: seatIconTexture(level), transparent: true, depthWrite: false }),
+        new THREE.SpriteMaterial({
+        map: seatIconTexture(level),
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+      }),
       );
       sprite.position.set(c.x, SEAT_ICON_HEIGHT, c.z);
       sprite.scale.setScalar(0.3);

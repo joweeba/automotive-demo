@@ -2,6 +2,7 @@ import { Viewer } from "../viewer/Viewer";
 import { Sidebar } from "./Sidebar";
 import { Header } from "./Header";
 import { CameraViewTabs } from "./CameraViewTabs";
+import { GroundTabs } from "./sections/SceneSection";
 import { MusicPlayer } from "./MusicPlayer";
 import { AgentFab } from "./AgentFab";
 import { AgentPanel } from "./agent/AgentPanel";
@@ -61,11 +62,12 @@ export function AppShell() {
 
         <Header />
 
-        {/* Camera-view switcher floats over the viewport in the base layout; it docks
-            into the config panel top while the agent chat is open. */}
+        {/* Camera-view + ground switchers float top-right over the viewport in the base
+            layout; they dock into the config panel top while the agent chat is open. */}
         {!chatOpen && (
-          <div className="pointer-events-auto absolute right-5 top-5">
+          <div className="pointer-events-auto absolute right-5 top-5 flex flex-col items-end gap-2">
             <CameraViewTabs />
+            <GroundTabs />
           </div>
         )}
 

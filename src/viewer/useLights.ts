@@ -141,6 +141,7 @@ export function useLights(scene: THREE.Object3D) {
           blending: THREE.AdditiveBlending,
           depthWrite: false,
           side: THREE.DoubleSide,
+          toneMapped: false, // additive beam color is tuned in sRGB; don't tone-map it
         });
         mat.userData = { max: dims.maxOpacity };
         const m = new THREE.Mesh(geo, mat);
@@ -158,6 +159,7 @@ export function useLights(scene: THREE.Object3D) {
         opacity: 0,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        toneMapped: false,
       });
       smat.userData = { max: Math.min(1, dims.maxOpacity * 2) };
       const s = new THREE.Sprite(smat);

@@ -111,6 +111,7 @@ Paint material: index 6, `Car_Paint_-_All_Colors`, currently gray
   ```ts
   {
     view: 'threeq'|'top'|'side'|'cabin',
+    ground: 'asphalt'|'dirt'|'marble'|'concrete', // surface the car sits on
     environment: { externalTemp: number, weather: 'clear'|'rain'|'fog' }, // the outside world
     // Interior
     climate: 'off'|'auto'|'ac'|'heat', temperature: number, // °F 60–85 (desired cabin target)
@@ -145,7 +146,11 @@ Paint material: index 6, `Car_Paint_-_All_Colors`, currently gray
 Built so far: the 3D viewer with the four camera presets, the full Tidal UI shell
 (Pass 1), **all of Pass 2**, and the **Pass 3 agent chat**. **Reacting to state:** trunk /
 frunk (hood) / wipers, cabin roof+glass dissolve, climate glow (AC/Heat) + wind washes
-(Fan), seat-heat 3D sprites, and head/tail/fog light beams + emissive lamps. The Liquid
+(Fan), seat-heat 3D sprites, and head/tail/fog light beams + emissive lamps. **Real-time
+"ray-traced" studio look:** IBL environment (reflections) + soft shadows + ACES tone
+mapping (`SceneEnvironment.tsx` / `useCarRealism.ts`), a **selectable reflective ground**
+(None/Road/Dirt/Marble/Concrete, chosen from a floating switcher under the View tabs) that
+fades into an atmospheric backdrop, and **wind-driven rain** when the wiper is on. The Liquid
 agent chat panel is built (see `src/agent/` + `src/ui/agent/`) — a **scripted** flow that
 fires REAL vehicleCommands. **Still deferred:** wiring a live LLM in place of the scripted
 `resolveScript` (the command vocabulary is the ready-made tool surface).
@@ -273,6 +278,35 @@ fires REAL vehicleCommands. **Still deferred:** wiring a live LLM in place of th
     tuning as the reference. **`padRight` prop:** the canvas is full-bleed behind the
     floating panel, so the camera applies `setViewOffset` (off-axis shear left by
     `padRight/2`) to keep the car composed in the viewport area left of the panel.
+  - `SceneEnvironment.tsx` — the IBL rig for the real-time "ray-traced" look: a drei
+    `<Environment>` built entirely from `<Lightformer>` panels (broad key + overhead box
+    + side rim strips + rear fill + ground bounce), baked once (`frames={1}`) into
+    `scene.environment` only (never the background — the canvas stays transparent). This
+    is what the paint/chrome/glass reflect. No external HDRI fetch, so it works offline.
+    `Viewer.tsx` pairs it with `<SoftShadows>`, ACES tone mapping, a shadow-casting key
+    `directionalLight`, and an exponential-fog atmospheric fade into a neutral dark backdrop.
+  - `useCarRealism.ts` — after the GLB loads, flags every car mesh (recursively prunes
+    `userData.isFx` overlays) `castShadow`+`receiveShadow` and bumps `envMapIntensity`
+    (~1.35) so reflections read. (The additive FX materials are set `toneMapped:false`
+    in their hooks — `useLights`/`useClimateEffects`/`useSeatIcons` — so ACES doesn't
+    shift their tuned sRGB colors.)
+  - `Ground.tsx` + `groundMaterials.ts` — the surface the car sits on (state `ground`;
+    **None** hides it → the car floats on the backdrop). A 60m plane using drei
+    `<MeshReflectorMaterial>` (real-time reflection pass, globally dampened toward matte)
+    so the car is mirrored in the surface. `groundMaterials.ts` **procedurally generates**
+    each surface's albedo/roughness/normal maps on a **1024²** canvas from tiling fractal
+    value-noise (no texture files to ship) + per-surface reflection tuning, cached per id:
+    **Road** (asphalt), **Dirt** (matte), **Marble** (polished, **tiled** with grout
+    seams), **Concrete** (mild). Reads a touch wetter while the wiper is on. Selected via
+    the floating **Ground** switcher under the View tabs (`src/ui/sections/SceneSection.tsx`
+    → `GroundTabs`/`GroundRow`) → `setGround`.
+  - `Rain.tsx` — wind-driven rain shown when `effectiveWiper(state) === 'on'` (read live
+    per frame). **Streaks:** a `THREE.LineSegments` cloud of ~5200 drops falls under
+    gravity; each streak is oriented along its velocity, so a **gusting crosswind** (a
+    wind vector that re-targets to a new gentle random value every ~1.6–4.5s and eases
+    toward it) visibly slants the sheet; per-drop brightness (vertex colors) gives depth.
+    **Splashes:** an `InstancedMesh` of flat additive ring ripples that bloom + fade on
+    the ground where drops land. Both fade in/out with the wiper.
 
 Scripts: `npm run dev` (Vite), `npm run build` (tsc -b + vite build),
 `npm run typecheck`.
@@ -314,7 +348,9 @@ Tidal has no `--muted` token — `src/index.css` shims it to `--background-secon
 
 **Config panel spec** (`src/ui/Sidebar.tsx`): **500px** wide; stacked `Band`s
 separated by full-width `--sidebar-border` dividers — Interior, Exterior (head/tail/fog),
-Windshield wiper (own band), Trunk/Frunk (own band). Each band has **24px** (`p-7`)
+Windshield wiper (own band), Trunk/Frunk (own band). (Ground is **not** here — it's a
+floating switcher under the View tabs; it only docks into the panel top, under the View
+row, when the agent chat is open.) Each band has **24px** (`p-7`)
 inset. Every control is **300px** wide (`ControlRow` right column). Type is **base
 (14px) / medium** everywhere; section titles are `text-foreground`, control labels are
 `text-muted-foreground` (leading icon brightens to foreground when active). Seat heater
@@ -324,7 +360,7 @@ inset. Every control is **300px** wide (`ControlRow` right column). Type is **ba
 **Canvas overlays** (`AppShell.tsx`): the 3D `<Viewer>` canvas is **full-bleed**
 (`absolute inset-0`, `overflow-hidden` root) so the car slides *behind* the floating
 panel instead of being clipped at its edge; the panel floats on top (`absolute right-0
-p-5`). The overlays — title left, camera-view switcher right, music player bottom-center,
+p-5`). The overlays — title left, camera-view switcher + ground switcher stacked top-right, music player bottom-center,
 agent FAB bottom-right — live in a `pointer-events-none` layer confined to the viewport
 area left of the panel (`right: PANEL_FOOTPRINT` = 540px), with interactive children
 re-enabled (`pointer-events-auto`) so canvas drag/zoom passes through the gaps. A top

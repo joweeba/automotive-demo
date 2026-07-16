@@ -13,6 +13,19 @@ export type SeatId = "driver" | "passenger" | "rear";
 export type SeatLevel = 0 | 1 | 2 | 3;
 export type Weather = "clear" | "rain" | "fog";
 
+/** The surface the car sits on. Each maps to a procedural PBR material + a
+ *  reflection strength (see src/viewer/groundMaterials.ts). "none" hides the ground
+ *  entirely — the car floats on the dark backdrop. */
+export type GroundId = "none" | "asphalt" | "dirt" | "marble" | "concrete";
+export const GROUND_ORDER: GroundId[] = ["none", "asphalt", "dirt", "marble", "concrete"];
+export const GROUND_LABELS: Record<GroundId, string> = {
+  none: "None",
+  asphalt: "Road",
+  dirt: "Dirt",
+  marble: "Marble",
+  concrete: "Concrete",
+};
+
 /** The outside world. Drives every "Auto" setting (see ./autoResolve). Day/night
  *  is not stored — it's read from the device clock at resolution time. */
 export interface Environment {
@@ -22,6 +35,7 @@ export interface Environment {
 
 export interface VehicleState {
   view: CameraView;
+  ground: GroundId; // the surface the car is parked on
   environment: Environment;
   // Interior
   climate: Climate;
@@ -46,7 +60,8 @@ export const EXT_TEMP_MAX = 110;
 // Defaults mirror the Figma base design (frame 123:1004).
 const initialState: VehicleState = {
   view: "threeq",
-  environment: { externalTemp: 72, weather: "rain" },
+  ground: "none",
+  environment: { externalTemp: 72, weather: "clear" },
   climate: "auto",
   temperature: 72,
   fan: true,

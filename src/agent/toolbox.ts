@@ -1,5 +1,6 @@
 import {
   setCameraView,
+  setGround,
   setClimate,
   setTemperature,
   stepTemperature,
@@ -15,7 +16,15 @@ import {
   setExternalTemp,
   setWeather,
 } from "../state/vehicleCommands";
-import { getState, TEMP_MIN, TEMP_MAX, EXT_TEMP_MIN, EXT_TEMP_MAX } from "../state/vehicleState";
+import {
+  getState,
+  TEMP_MIN,
+  TEMP_MAX,
+  EXT_TEMP_MIN,
+  EXT_TEMP_MAX,
+  GROUND_ORDER,
+  GROUND_LABELS,
+} from "../state/vehicleState";
 import type { SeatId, SeatLevel } from "../state/vehicleState";
 import {
   effectiveClimate,
@@ -105,6 +114,26 @@ export const TOOLS: Tool[] = [
       const view = str(a, "view", ["threeq", "top", "side", "cabin"]) as never;
       setCameraView(view);
       return `Camera view set to ${view}.`;
+    },
+  },
+
+  // ── Scene ──────────────────────────────────────────────────────────────────
+  {
+    name: "setGround",
+    description:
+      "Change the surface the car is parked on. 'marble' is a polished, highly reflective showroom floor; 'dirt' is a matte off-road surface.",
+    parameters: {
+      surface: {
+        type: "string",
+        description: "Ground surface.",
+        enum: [...GROUND_ORDER],
+        required: true,
+      },
+    },
+    invoke: (a) => {
+      const surface = str(a, "surface", [...GROUND_ORDER]) as never;
+      setGround(surface);
+      return `Ground set to ${GROUND_LABELS[surface]}.`;
     },
   },
 
@@ -363,6 +392,7 @@ export function getVehicleSnapshot() {
   const m = getMusic();
   return {
     view: s.view,
+    ground: s.ground,
     environment: { ...s.environment, isNight: isNight() },
     interior: {
       climate: s.climate,
