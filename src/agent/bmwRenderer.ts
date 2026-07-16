@@ -125,8 +125,12 @@ function applyClimate(): void {
   // Glow: BMW expresses heating via temperature (there is no "heat" mode intent),
   // so infer heat from a warm setpoint vs. the outside temp when AC/auto are off.
   const acOn = anyZone("climate.ac", truthy) || anyZone("climate.max_ac", truthy);
-  const autoOn = anyZone("climate.climate_auto", truthy);
-  const extF = parseTempF(mirror["info.exterior_temp"]);
+  // Emulator flatten() emits `climate.auto.<zone>` (car_toggle_climate_auto),
+  // NOT `climate.climate_auto` — see docs/emulator/command-taxonomy.md.
+  const autoOn = anyZone("climate.auto", truthy);
+  // Read-only vehicle info flattens as `info.<PROPERTY>` in the model's UPPER_SNAKE
+  // enum (docs/emulator/ui-integration-api.md), e.g. `info.EXTERIOR_TEMPERATURE`.
+  const extF = parseTempF(mirror["info.EXTERIOR_TEMPERATURE"]);
   let mode: Climate = "off";
   if (acOn) mode = "ac";
   else if (autoOn) mode = "auto";
@@ -167,7 +171,9 @@ function applyMedia(): void {
 }
 
 function applyEnvironment(): void {
-  const extF = parseTempF(mirror["info.exterior_temp"]);
+  // Canonical flatten path is `info.EXTERIOR_TEMPERATURE` (UPPER_SNAKE property),
+  // not `info.exterior_temp` — see docs/emulator/ui-integration-api.md.
+  const extF = parseTempF(mirror["info.EXTERIOR_TEMPERATURE"]);
   if (extF != null) setExternalTemp(Math.round(extF));
   // info.DATE / info.TIME / nav.gps are environmental truth; the web demo's Auto rules
   // run off the device clock, so we mirror but don't act on them.
@@ -255,7 +261,19 @@ function onOutcome(evt: { intent?: string; result?: string; reason?: string }): 
   const result = String(evt.result ?? "");
   const label = OUTCOME_LABEL[result] ?? result ?? "";
   const reason = evt.reason ? ` — ${String(evt.reason)}` : "";
-  const level: LogLevel = result === "applied" || result === "read" ? "event" : "error";
+  // Severity by outcome CLASS, not "anything that isn't applied is an error".
+  //  - applied / read           → event  (the visible change already arrived)
+  //  - not_equipped / not_impl. → info   (EXPECTED product states: this trim
+  //                                        lacks the feature, or the head-unit UI
+  //                                        doesn't cover it yet — surface, don't
+  //                                        red-error, or every gated command spews)
+  //  - rejected / unknown       → error  (a genuinely malformed / unmodeled call)
+  const level: LogLevel =
+    result === "applied" || result === "read"
+      ? "event"
+      : result === "not_equipped" || result === "not_implemented"
+        ? "info"
+        : "error";
   pushConsole(level, `bmw ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
 }
 
