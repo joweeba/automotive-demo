@@ -70,7 +70,15 @@ registerProcessor(${JSON.stringify(MIC_WORKLET_NAME)}, MicCaptureProcessor);
  * The full worklet module source: the two pure conversion functions (embedded
  * verbatim so the worklet and the unit-tested code are identical) plus the
  * processor. Loaded via a Blob URL by micCapture.
+ *
+ * The functions are bound to explicit const names the processor calls, so a
+ * production minifier renaming the source functions can't break the worklet's
+ * call sites (fn.toString() reflects the minified name).
  */
 export function buildWorkletSource(): string {
-  return `${downsampleTo16k.toString()}\n${floatToPcm16.toString()}\n${processorBody}`;
+  return [
+    `const downsampleTo16k = ${downsampleTo16k.toString()};`,
+    `const floatToPcm16 = ${floatToPcm16.toString()};`,
+    processorBody,
+  ].join("\n");
 }
