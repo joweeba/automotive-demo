@@ -376,29 +376,49 @@ function socketOpen(): boolean {
  */
 export function sendControl(cmd: MicControlCmd): void {
   if (!socketOpen()) {
+    console.warn(`[mic-debug] control "${cmd}" DROPPED — WebSocket not open (readyState=${socket?.readyState ?? "null"}). Did you open the UI with ?emulator=ws://localhost:8787 ?`);
     pushConsole("info", `bmw: drop control "${cmd}" (socket not open)`);
     return;
   }
   try {
     socket!.send(JSON.stringify(buildControlMessage(cmd)));
+    console.info(`[mic-debug] → control ${cmd}`);
     pushConsole("tool", `bmw → ${cmd}`);
   } catch (err) {
+    console.error(`[mic-debug] control send failed:`, err);
     pushConsole("error", `bmw: control send failed: ${String(err)}`);
   }
 }
+
+// Diagnostic: count audio frames sent so we can see (in the browser console)
+// whether the worklet is actually producing + shipping audio, without spamming.
+let audioFrameCount = 0;
 
 /**
  * Send one frame of PCM16 audio as a BINARY frame. Drops silently if the socket
  * is not open (audio frames are high-rate; we don't log each drop). Never throws.
  */
 export function sendAudio(pcm16: Int16Array): void {
-  if (!socketOpen() || pcm16.length === 0) return;
+  if (pcm16.length === 0) return;
+  if (!socketOpen()) {
+    if (audioFrameCount === 0)
+      console.warn(`[mic-debug] audio frame produced but WebSocket not open — dropping (readyState=${socket?.readyState ?? "null"})`);
+    return;
+  }
   try {
     // Send exactly this view's bytes (respect byteOffset/length if it's a slice).
     socket!.send(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength));
+    audioFrameCount++;
+    if (audioFrameCount === 1 || audioFrameCount % 25 === 0)
+      console.info(`[mic-debug] → audio frame #${audioFrameCount} (${pcm16.length} samples)`);
   } catch {
     /* transient send failure — drop the frame, keep streaming */
   }
+}
+
+/** Reset the diagnostic audio-frame counter (call on stop so the next stream re-logs). */
+export function resetAudioFrameCount(): void {
+  audioFrameCount = 0;
 }
 
 /** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
@@ -424,15 +444,23 @@ function openSocket(): void {
     scheduleReconnect();
     return;
   }
+  console.info(`[mic-debug] WebSocket connecting to ${wantUrl}…`);
   pushConsole("event", `bmw: connecting to ${wantUrl}…`);
-  socket.onopen = () => pushConsole("event", `bmw: connected ${wantUrl}`);
+  socket.onopen = () => {
+    console.info(`[mic-debug] WebSocket OPEN ${wantUrl}`);
+    pushConsole("event", `bmw: connected ${wantUrl}`);
+  };
   socket.onmessage = (ev) => {
     if (typeof ev.data === "string") ingest(ev.data);
   };
-  socket.onerror = () => pushConsole("error", "bmw: socket error");
+  socket.onerror = () => {
+    console.error(`[mic-debug] WebSocket ERROR for ${wantUrl}`);
+    pushConsole("error", "bmw: socket error");
+  };
   socket.onclose = () => {
     socket = null;
     if (wantUrl) {
+      console.warn(`[mic-debug] WebSocket CLOSED ${wantUrl} — retrying`);
       pushConsole("event", "bmw: disconnected — retrying");
       scheduleReconnect();
     }
