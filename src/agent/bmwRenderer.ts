@@ -333,6 +333,74 @@ export function getMirror(): Record<string, string> {
   return { ...mirror };
 }
 
+// ── outbound: mic control + audio (bidirectional, same socket) ───────────────
+// The receive path above consumes the emulator's NDJSON stream unchanged; here
+// we SEND on the same socket per the shared WS protocol:
+//   • Control = WS TEXT frame, JSON `{"v":2,"in":"<cmd>",...}`
+//   • Audio   = WS BINARY frame, raw little-endian PCM16 mono 16 kHz, no header
+// Binary frames are only meaningful between a start (mic_start/ptt_down) and its
+// matching stop (mic_stop/ptt_up); the emulator enforces that, we just send.
+
+/** The four control commands the UI can send. */
+export type MicControlCmd = "mic_start" | "mic_stop" | "ptt_down" | "ptt_up";
+
+/** Audio-format descriptor included with the "start" commands (matches the wire spec). */
+export const AUDIO_FORMAT = {
+  sample_rate: 16000,
+  format: "pcm16le",
+  channels: 1,
+} as const;
+
+/**
+ * Build the JSON control message for a command (pure — unit-tested). `mic_start`
+ * and `ptt_down` carry the audio-format descriptor; the stops are bare.
+ */
+export function buildControlMessage(cmd: MicControlCmd): Record<string, unknown> {
+  const msg: Record<string, unknown> = { v: PROTOCOL_VERSION, in: cmd };
+  if (cmd === "mic_start" || cmd === "ptt_down") Object.assign(msg, AUDIO_FORMAT);
+  return msg;
+}
+
+/** True when the socket is present and open (safe to send). */
+function socketOpen(): boolean {
+  return (
+    socket != null &&
+    typeof WebSocket !== "undefined" &&
+    socket.readyState === WebSocket.OPEN
+  );
+}
+
+/**
+ * Send a mic control command as a JSON TEXT frame. No-ops (drops) gracefully if
+ * the socket is not open — never throws.
+ */
+export function sendControl(cmd: MicControlCmd): void {
+  if (!socketOpen()) {
+    pushConsole("info", `bmw: drop control "${cmd}" (socket not open)`);
+    return;
+  }
+  try {
+    socket!.send(JSON.stringify(buildControlMessage(cmd)));
+    pushConsole("tool", `bmw → ${cmd}`);
+  } catch (err) {
+    pushConsole("error", `bmw: control send failed: ${String(err)}`);
+  }
+}
+
+/**
+ * Send one frame of PCM16 audio as a BINARY frame. Drops silently if the socket
+ * is not open (audio frames are high-rate; we don't log each drop). Never throws.
+ */
+export function sendAudio(pcm16: Int16Array): void {
+  if (!socketOpen() || pcm16.length === 0) return;
+  try {
+    // Send exactly this view's bytes (respect byteOffset/length if it's a slice).
+    socket!.send(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength));
+  } catch {
+    /* transient send failure — drop the frame, keep streaming */
+  }
+}
+
 /** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
 export function reset(): void {
   mirror = {};
