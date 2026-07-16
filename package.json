@@ -21,6 +21,7 @@
     "@tabler/icons-react": "^3.44.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "standardized-audio-context": "^25.3.77",
     "three": "^0.171.0"
   },
   "devDependencies": {

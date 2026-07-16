@@ -7,6 +7,7 @@ const LEVEL_COLOR: Record<LogLevel, string> = {
   event: "text-muted-foreground",
   tool: "text-status-info",
   info: "text-foreground",
+  warn: "text-status-warning",
   error: "text-status-error",
 };
 

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { resolveScript } from "./scripts";
+import type { ConnectionState } from "./connection";
 
 // ---------------------------------------------------------------------------
 // agentStore — UI state + scripted engine for the "Liquid agent" chat panel.
@@ -33,7 +34,7 @@ export const PHASE_LABEL: Record<Exclude<AgentPhase, "idle">, string> = {
   speaking: "Speaking…",
 };
 
-export type LogLevel = "event" | "tool" | "info" | "error";
+export type LogLevel = "event" | "tool" | "info" | "warn" | "error";
 
 export interface ConsoleEntry {
   id: number;
@@ -60,6 +61,13 @@ export interface AgentState {
   micStreaming: boolean; // continuous-mic toggle — DEFAULT OFF (privacy)
   pttActive: boolean; // hold-to-talk currently held
   micPermission: MicPermission; // permission / capture status for UI feedback
+  // Emulator-WebSocket connection status (driven by bmwRenderer via ./connection).
+  // Rendered as a visible indicator; gates the mic controls so we can never send
+  // into a closed socket without the user knowing why.
+  connection: ConnectionState;
+  connectionUrl: string | null; // the URL we are connected to / attempting
+  connectionReason: string | null; // why we're not connected (for the UI)
+  audioDropped: number; // count of audio frames dropped because the socket wasn't open
 }
 
 /** Browser-mic permission / capture status surfaced in the UI. */
@@ -81,6 +89,10 @@ const initial: AgentState = {
   micStreaming: false,
   pttActive: false,
   micPermission: "unknown",
+  connection: "disconnected",
+  connectionUrl: null,
+  connectionReason: "No emulator connection",
+  audioDropped: 0,
 };
 
 let state: AgentState = initial;
@@ -288,6 +300,29 @@ export function setPttActive(pttActive: boolean): void {
 
 export function setMicPermission(micPermission: MicPermission): void {
   set({ micPermission });
+}
+
+// --- emulator-WebSocket connection state (driven by bmwRenderer) ------------
+
+/** Reflect a connection-state transition (+ optional URL / human reason) into the UI. */
+export function setConnection(
+  connection: ConnectionState,
+  opts?: { url?: string | null; reason?: string | null },
+): void {
+  const patch: Partial<AgentState> = { connection };
+  if (opts && "url" in opts) patch.connectionUrl = opts.url ?? null;
+  if (opts && "reason" in opts) patch.connectionReason = opts.reason ?? null;
+  set(patch);
+}
+
+/** Increment the count of audio frames dropped because the socket was not open. */
+export function noteAudioDropped(n = 1): void {
+  set({ audioDropped: state.audioDropped + n });
+}
+
+/** Reset the dropped-audio counter (e.g. when a fresh stream starts). */
+export function resetAudioDropped(): void {
+  if (state.audioDropped !== 0) set({ audioDropped: 0 });
 }
 
 export function toggleConsole(): void {
