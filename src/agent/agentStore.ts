@@ -56,7 +56,14 @@ export interface AgentState {
   transcript: string; // live user speech transcript
   consoleLog: ConsoleEntry[];
   consoleOpen: boolean;
+  // Real browser-mic streaming (distinct from the simulated `listening`/`micMuted`):
+  micStreaming: boolean; // continuous-mic toggle — DEFAULT OFF (privacy)
+  pttActive: boolean; // hold-to-talk currently held
+  micPermission: MicPermission; // permission / capture status for UI feedback
 }
+
+/** Browser-mic permission / capture status surfaced in the UI. */
+export type MicPermission = "unknown" | "granted" | "denied" | "error";
 
 const initial: AgentState = {
   open: false,
@@ -71,6 +78,9 @@ const initial: AgentState = {
   transcript: "",
   consoleLog: [],
   consoleOpen: false,
+  micStreaming: false,
+  pttActive: false,
+  micPermission: "unknown",
 };
 
 let state: AgentState = initial;
@@ -264,6 +274,20 @@ export function toggleMic(): void {
 
 export function setTranscript(transcript: string): void {
   set({ transcript });
+}
+
+// --- real browser-mic streaming state (driven by ./micStreaming) ------------
+
+export function setMicStreaming(micStreaming: boolean): void {
+  set({ micStreaming });
+}
+
+export function setPttActive(pttActive: boolean): void {
+  set({ pttActive });
+}
+
+export function setMicPermission(micPermission: MicPermission): void {
+  set({ micPermission });
 }
 
 export function toggleConsole(): void {
