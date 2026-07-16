@@ -28,7 +28,7 @@ import { resolve } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { ingest, reset, getMirror } from "../src/agent/bmwRenderer";
 import { getState } from "../src/state/vehicleState";
-import { getMusic, TRACKS } from "../src/state/musicStore";
+import { getMusic, togglePlay, TRACKS } from "../src/state/musicStore";
 import { getAgentState, clearConsole } from "../src/agent/agentStore";
 
 const FIX = resolve(__dirname, "fixtures", "variants");
@@ -113,16 +113,26 @@ function anyZone(m: Record<string, string>, prefix: string, pred: (v: string) =>
   return Object.entries(m).some(([p, v]) => (p === prefix || p.startsWith(`${prefix}.`)) && pred(v));
 }
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
-const ZONE_TO_SEAT: Record<string, "driver" | "passenger" | "rear"> = {
-  DRIVER: "driver",
-  FRONT_LEFT: "driver",
-  PASSENGER: "passenger",
-  FRONT_RIGHT: "passenger",
-  REAR_LEFT: "rear",
-  REAR_RIGHT: "rear",
-  REAR_CENTER: "rear",
-  THIRD_ROW: "rear",
-  BACK: "rear",
+// Independent oracle copy of the renderer's zone→seat-anchor table. Must cover
+// ALL 14 seat_heating zone enum values (incl. the aggregates ALL_CAR/FRONT/
+// PASSENGERS and the bare-call default ALL_CAR) or a mapped seat-heating command
+// is silently dropped.
+type SeatId = "driver" | "passenger" | "rear";
+const ZONE_TO_SEAT: Record<string, SeatId[]> = {
+  DRIVER: ["driver"],
+  FRONT_LEFT: ["driver"],
+  PASSENGER: ["passenger"],
+  FRONT_RIGHT: ["passenger"],
+  PASSENGER_LEFT: ["passenger"],
+  PASSENGER_RIGHT: ["passenger"],
+  REAR_LEFT: ["rear"],
+  REAR_RIGHT: ["rear"],
+  REAR_CENTER: ["rear"],
+  THIRD_ROW: ["rear"],
+  BACK: ["rear"],
+  FRONT: ["driver", "passenger"],
+  PASSENGERS: ["passenger", "rear"],
+  ALL_CAR: ["driver", "passenger", "rear"],
 };
 function seatLevel(v?: string): 0 | 1 | 2 | 3 {
   switch ((v ?? "").toUpperCase()) {
@@ -180,15 +190,14 @@ const MAPPED: Mapped[] = [
     id: "climate.seat_heating.<zone> → seatHeat",
     match: (p) => p.startsWith("climate.seat_heating."),
     check: (m) => {
-      const acc: Record<"driver" | "passenger" | "rear", 0 | 1 | 2 | 3> = { driver: 0, passenger: 0, rear: 0 };
+      const acc: Record<SeatId, 0 | 1 | 2 | 3> = { driver: 0, passenger: 0, rear: 0 };
       for (const [path, val] of Object.entries(m)) {
         if (!path.startsWith("climate.seat_heating.")) continue;
-        const seat = ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)];
-        if (seat) acc[seat] = Math.max(acc[seat], seatLevel(val)) as 0 | 1 | 2 | 3;
+        for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
+          acc[seat] = Math.max(acc[seat], seatLevel(val)) as 0 | 1 | 2 | 3;
+        }
       }
-      (Object.keys(acc) as ("driver" | "passenger" | "rear")[]).forEach((s) =>
-        expect(getState().seatHeat[s]).toBe(acc[s]),
-      );
+      (Object.keys(acc) as SeatId[]).forEach((s) => expect(getState().seatHeat[s]).toBe(acc[s]));
     },
   },
   {
@@ -407,6 +416,21 @@ describe("mapped-path contract pins (isolated)", () => {
     expect(getState().seatHeat.driver).toBe(3);
   });
 
+  it("climate.seat_heating.ALL_CAR (bare-call default) → all three seat anchors", () => {
+    // The most common seat-heating command grounds to ALL_CAR; it must reach
+    // every seat anchor, not be silently dropped. Hardcoded expectation — does
+    // not use ZONE_TO_SEAT — so a regressed table trips here.
+    snap({ "climate.seat_heating.ALL_CAR": "MEDIUM" });
+    expect(getState().seatHeat).toEqual({ driver: 2, passenger: 2, rear: 2 });
+  });
+
+  it("climate.seat_heating.FRONT → driver + passenger anchors", () => {
+    snap({ "climate.seat_heating.FRONT": "HIGH" });
+    expect(getState().seatHeat.driver).toBe(3);
+    expect(getState().seatHeat.passenger).toBe(3);
+    expect(getState().seatHeat.rear).toBe(0);
+  });
+
   it("lighting.light.DRIVING → headlights on", () => {
     snap({ "lighting.light.DRIVING": "on" });
     expect(getState().headlights).toBe("on");
@@ -421,5 +445,15 @@ describe("mapped-path contract pins (isolated)", () => {
   it("media.track_index → wrapped track index", () => {
     snap({ "media.track_index": String(TRACKS.length + 1) });
     expect(getMusic().index).toBe(1 % TRACKS.length);
+  });
+
+  it("media.source → playing (decisive from a paused start)", () => {
+    // Music starts playing:true and no corpus variant pauses it, so assert from a
+    // paused state: a media.source snapshot must flip playing on. If applyMedia's
+    // togglePlay wiring were removed, this trips.
+    if (getMusic().playing) togglePlay();
+    expect(getMusic().playing).toBe(false);
+    snap({ "media.source": "SPOTIFY" });
+    expect(getMusic().playing).toBe(true);
   });
 });

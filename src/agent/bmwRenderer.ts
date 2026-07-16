@@ -49,17 +49,27 @@ const SUPPORTED_VERSIONS = new Set([1, 2]);
 /** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
 const HEAT_INFER_F = 74;
 
-// The emulator's 14-zone enum → this rig's three seat anchors (driver/passenger/rear).
-const ZONE_TO_SEAT: Record<string, SeatId> = {
-  DRIVER: "driver",
-  FRONT_LEFT: "driver",
-  PASSENGER: "passenger",
-  FRONT_RIGHT: "passenger",
-  REAR_LEFT: "rear",
-  REAR_RIGHT: "rear",
-  REAR_CENTER: "rear",
-  THIRD_ROW: "rear",
-  BACK: "rear",
+// The emulator's full 14-zone seat enum → this rig's three seat anchors
+// (driver/passenger/rear). MUST cover every zone value the model can emit for a
+// seat command — including the aggregates (ALL_CAR/FRONT/PASSENGERS) and the
+// bare-call default ALL_CAR — or a seat command lands on no anchor and is
+// silently dropped. Aggregates fan out to multiple anchors; the rig cannot split
+// left/right within a row, so PASSENGER_LEFT/RIGHT collapse to the passenger anchor.
+const ZONE_TO_SEAT: Record<string, SeatId[]> = {
+  DRIVER: ["driver"],
+  FRONT_LEFT: ["driver"],
+  PASSENGER: ["passenger"],
+  FRONT_RIGHT: ["passenger"],
+  PASSENGER_LEFT: ["passenger"],
+  PASSENGER_RIGHT: ["passenger"],
+  REAR_LEFT: ["rear"],
+  REAR_RIGHT: ["rear"],
+  REAR_CENTER: ["rear"],
+  THIRD_ROW: ["rear"],
+  BACK: ["rear"],
+  FRONT: ["driver", "passenger"],
+  PASSENGERS: ["passenger", "rear"],
+  ALL_CAR: ["driver", "passenger", "rear"],
 };
 
 // ── the mirror ──────────────────────────────────────────────────────────────
@@ -141,8 +151,9 @@ function applyClimate(): void {
   const acc: Record<SeatId, SeatLevel> = { driver: 0, passenger: 0, rear: 0 };
   for (const [path, val] of Object.entries(mirror)) {
     if (!path.startsWith("climate.seat_heating.")) continue;
-    const seat = ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)];
-    if (seat) acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
+    for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
+      acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
+    }
   }
   (Object.keys(acc) as SeatId[]).forEach((seat) => setSeatHeat(seat, acc[seat]));
 }
