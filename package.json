@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run test/bmwRenderer.integration.test.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest"
@@ -29,6 +30,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/three": "^0.171.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",

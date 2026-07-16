@@ -8,6 +8,7 @@ import {
   stopCapture,
   isCapturing,
   MicCaptureException,
+  defaultCaptureEnv,
   _resetForTest,
   type CaptureEnv,
   type CaptureContext,
@@ -146,6 +147,34 @@ describe("startCapture — AudioContext resume", () => {
     expect(warn).toHaveBeenCalled();
     // capture still set up (resume failure is non-fatal on its own)
     expect(isCapturing()).toBe(true);
+  });
+
+  it("warns when the context is STILL suspended after resume (no-audio hint)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = makeHarness();
+    // resume resolves but the context refuses to leave 'suspended'.
+    h.ctx.resume.mockResolvedValue(undefined);
+    await startCapture(vi.fn(), h.env);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("still suspended"))).toBe(
+      true,
+    );
+  });
+});
+
+// ── the real default env factory ─────────────────────────────────────────────
+describe("defaultCaptureEnv", () => {
+  it("returns the four capture primitives", () => {
+    const env = defaultCaptureEnv();
+    expect(env).toHaveProperty("getUserMedia");
+    expect(env).toHaveProperty("createContext");
+    expect(env).toHaveProperty("createNode");
+    expect(env).toHaveProperty("createObjectURL");
+  });
+
+  it("leaves getUserMedia undefined when navigator.mediaDevices is unavailable", () => {
+    // In the node test env there is no navigator.mediaDevices → unsupported path.
+    const env = defaultCaptureEnv();
+    expect(env.getUserMedia).toBeUndefined();
   });
 });
 
