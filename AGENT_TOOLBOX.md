@@ -280,14 +280,14 @@ or a `…C` suffix is treated as Celsius → °F). Zones collapse to three seat 
 |---|---|
 | `climate.temperature.<zone>` | cabin temperature (°F; prefers `DRIVER`) |
 | `climate.ac.<zone>` / `climate.max_ac.<zone>` | climate glow → **AC** (blue) |
-| `climate.climate_auto.<zone>` | climate mode → **auto** |
+| `climate.auto.<zone>` | climate mode → **auto** |
 | `climate.fan_speed.<zone>` | **fan** on when any zone ≠ `OFF`/`0` (drives the wind wash) |
 | `climate.seat_heating.<zone>` | seat-heat sprite `OFF/LOW/MED/HIGH` → level `0/1/2/3` (max across mapped zones) |
 | `lighting.light.DRIVING` / `.DAYTIME` | head + tail light beams + emissive lamps |
 | `media.volume` / `media.muted` | player volume (mute → 0) |
 | `media.source` | sets the player "playing" |
 | `media.track_index` | selects the track (mod playlist length) |
-| `info.exterior_temp` | outside temperature (drives the Auto rules) |
+| `info.EXTERIOR_TEMPERATURE` | outside temperature (drives the Auto rules) |
 
 **Inferred:** the `bmw_new` vocabulary has **no "heat" mode** (heating is expressed via a
 warmer temperature setpoint), so the red **heat** glow is inferred when AC/auto are off and
@@ -303,7 +303,7 @@ vocabulary doesn't command (trunk/frunk/wipers) — harmless; they stay UI/demo-
 ### Example — a grounded "keep the kids warm" turn
 
 ```
-{"v":1,"event":"snapshot","state":{"climate.temperature.DRIVER":"21","climate.seat_heating.REAR_LEFT":"OFF","info.exterior_temp":"14","media.volume":"20", …}}
+{"v":1,"event":"snapshot","state":{"climate.temperature.DRIVER":"21","climate.seat_heating.REAR_LEFT":"OFF","info.EXTERIOR_TEMPERATURE":"14","media.volume":"20", …}}
 {"v":1,"event":"state_change","changes":[{"path":"climate.temperature.DRIVER","from":"21","to":"24"},{"path":"climate.seat_heating.REAR_LEFT","from":"OFF","to":"HIGH"}],"state_summary":"temp[DRIVER]=24C | seat_heat[REAR_LEFT]=HIGH"}
 {"v":1,"event":"animation","target":"seat_heating","action":"HIGH","detail":"REAR_LEFT"}
 ```
