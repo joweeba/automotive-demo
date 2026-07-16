@@ -14,7 +14,12 @@
 // ---------------------------------------------------------------------------
 
 import { startCapture, stopCapture, MicCaptureException } from "../audio/micCapture";
-import { sendControl, sendAudio, type MicControlCmd } from "./bmwRenderer";
+import {
+  sendControl,
+  sendAudio,
+  resetAudioFrameCount,
+  type MicControlCmd,
+} from "./bmwRenderer";
 import {
   setMicStreaming,
   setPttActive,
@@ -29,6 +34,7 @@ let active: Mode | null = null;
 /** Start capture and emit the start control frame. Returns true on success. */
 async function begin(mode: Mode, startCmd: MicControlCmd): Promise<boolean> {
   if (active) return false; // another mode owns the mic
+  resetAudioFrameCount(); // fresh stream → re-log diagnostics + clear drop counts
   try {
     await startCapture(sendAudio);
     // Control frame first: WS preserves send order, and sendControl runs before
@@ -40,7 +46,11 @@ async function begin(mode: Mode, startCmd: MicControlCmd): Promise<boolean> {
   } catch (err) {
     const kind = err instanceof MicCaptureException ? err.kind : "failed";
     setMicPermission(kind === "denied" ? "denied" : "error");
-    pushConsole("error", `mic: ${err instanceof Error ? err.message : String(err)}`);
+    const message = err instanceof Error ? err.message : String(err);
+    // Capture/permission failures are real ERRORS — surface to console.error AND
+    // the in-UI console (owner directive: nothing swallowed, errors → console.error).
+    console.error(`[mic] capture failed (${kind}):`, err);
+    pushConsole("error", `mic: ${message}`);
     return false;
   }
 }

@@ -37,7 +37,20 @@ import {
 } from "../state/vehicleCommands";
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
-import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
+import {
+  setPhase,
+  setTranscript,
+  pushConsole,
+  setConnection,
+  noteAudioDropped,
+  resetAudioDropped,
+  type LogLevel,
+} from "./agentStore";
+import {
+  nextConnectionState,
+  type ConnectionState,
+  type ConnectionEvent,
+} from "./connection";
 
 // The newest protocol version this renderer understands.
 export const PROTOCOL_VERSION = 2;
@@ -224,7 +237,12 @@ interface Change {
 function onStateChange(changes: Change[]): void {
   const paths: string[] = [];
   for (const c of changes) {
-    if (!c || typeof c.path !== "string") continue;
+    if (!c || typeof c.path !== "string") {
+      // A malformed change entry — surface it (no silent drop) and skip just it.
+      console.warn("[bmw] skipped malformed state_change entry:", c);
+      pushConsole("warn", `bmw: skipped malformed change entry`);
+      continue;
+    }
     mirror[c.path] = c.to;
     paths.push(c.path);
     pushConsole("tool", `bmw Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
@@ -289,7 +307,13 @@ function onOutcome(evt: { intent?: string; result?: string; reason?: string }): 
 }
 
 function dispatch(evt: unknown): void {
-  if (evt == null || typeof evt !== "object") return;
+  if (evt == null || typeof evt !== "object") {
+    // Not a protocol object — surface rather than silently swallow (owner directive:
+    // no silent drops). Recoverable/expected-but-notable → warn, not error.
+    console.warn("[bmw] ignored non-object event:", evt);
+    pushConsole("warn", `bmw: ignored non-object event (${typeof evt})`);
+    return;
+  }
   const e = evt as Record<string, unknown>;
   if (e.v !== undefined && !SUPPORTED_VERSIONS.has(e.v as number)) {
     pushConsole(
@@ -319,11 +343,21 @@ export function ingest(data: string | object): void {
   if (typeof data !== "string") return dispatch(data);
   for (const line of data.split(/\r?\n/)) {
     const t = line.trim();
-    if (!t || t[0] !== "{") continue; // protocol lines start at column 0 with '{' (spec §4.5)
+    if (!t) continue; // blank line — nothing to surface
+    if (t[0] !== "{") {
+      // Non-protocol line (e.g. interleaved emulator log). Expected-but-notable:
+      // surface as a warning so it is never a silent drop (spec §4.5: lines start
+      // at column 0 with '{').
+      console.warn(`[bmw] ignored non-protocol line: ${t.slice(0, 80)}`);
+      pushConsole("warn", `bmw: ignored non-protocol line: ${t.slice(0, 60)}`);
+      continue;
+    }
     try {
       dispatch(JSON.parse(t));
-    } catch {
-      pushConsole("error", `bmw: unparseable line: ${t.slice(0, 80)}`);
+    } catch (err) {
+      // A malformed inbound line — recoverable but notable (owner directive).
+      console.warn(`[bmw] unparseable line: ${t.slice(0, 80)}`, err);
+      pushConsole("warn", `bmw: unparseable line: ${t.slice(0, 80)}`);
     }
   }
 }
@@ -376,33 +410,56 @@ function socketOpen(): boolean {
  */
 export function sendControl(cmd: MicControlCmd): void {
   if (!socketOpen()) {
-    console.warn(`[mic-debug] control "${cmd}" DROPPED — WebSocket not open (readyState=${socket?.readyState ?? "null"}). Did you open the UI with ?emulator=ws://localhost:8787 ?`);
-    pushConsole("info", `bmw: drop control "${cmd}" (socket not open)`);
+    // Recoverable/expected-but-notable: the socket isn't open, so the command can't
+    // go out. Surface loudly (console.warn + UI) — NEVER a silent drop. Controls are
+    // low-rate, so we log every one.
+    console.warn(
+      `[bmw] control "${cmd}" NOT SENT — WebSocket not open (readyState=${socket?.readyState ?? "null"}). Connect to an emulator first.`,
+    );
+    pushConsole("warn", `bmw: control "${cmd}" not sent — not connected`);
     return;
   }
   try {
     socket!.send(JSON.stringify(buildControlMessage(cmd)));
-    console.info(`[mic-debug] → control ${cmd}`);
+    console.info(`[bmw] → control ${cmd}`);
     pushConsole("tool", `bmw → ${cmd}`);
   } catch (err) {
-    console.error(`[mic-debug] control send failed:`, err);
+    // A genuine send failure is an ERROR.
+    console.error(`[bmw] control "${cmd}" send failed:`, err);
     pushConsole("error", `bmw: control send failed: ${String(err)}`);
   }
 }
 
-// Diagnostic: count audio frames sent so we can see (in the browser console)
-// whether the worklet is actually producing + shipping audio, without spamming.
-let audioFrameCount = 0;
+// Diagnostics: counters so we can see (in the browser console AND the UI) whether
+// the worklet is producing + shipping audio, and whether anything is being dropped
+// — no path silently no-ops.
+let audioFrameCount = 0; // frames successfully sent
+let droppedAudioFrames = 0; // frames dropped because the socket wasn't open
+let idleAudioFrames = 0; // empty frames produced by the worklet
+let sendAudioErrors = 0; // frames that threw on send()
 
 /**
  * Send one frame of PCM16 audio as a BINARY frame. Drops silently if the socket
  * is not open (audio frames are high-rate; we don't log each drop). Never throws.
  */
 export function sendAudio(pcm16: Int16Array): void {
-  if (pcm16.length === 0) return;
+  if (pcm16.length === 0) {
+    // An empty/idle frame is expected-but-notable — count it so a "no audio"
+    // investigation can see the worklet is producing empties rather than nothing.
+    idleAudioFrames++;
+    if (idleAudioFrames === 1)
+      console.warn("[bmw] mic worklet produced an empty audio frame (ignored)");
+    return;
+  }
   if (!socketOpen()) {
-    if (audioFrameCount === 0)
-      console.warn(`[mic-debug] audio frame produced but WebSocket not open — dropping (readyState=${socket?.readyState ?? "null"})`);
+    // Audio frames are high-rate; log the FIRST drop loudly and then throttle, but
+    // ALWAYS reflect the running drop count in state/UI so the drop is never silent.
+    droppedAudioFrames++;
+    noteAudioDropped(1);
+    if (droppedAudioFrames === 1 || droppedAudioFrames % 50 === 0)
+      console.warn(
+        `[bmw] audio frame dropped — WebSocket not open (dropped ${droppedAudioFrames}, readyState=${socket?.readyState ?? "null"})`,
+      );
     return;
   }
   try {
@@ -410,15 +467,38 @@ export function sendAudio(pcm16: Int16Array): void {
     socket!.send(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength));
     audioFrameCount++;
     if (audioFrameCount === 1 || audioFrameCount % 25 === 0)
-      console.info(`[mic-debug] → audio frame #${audioFrameCount} (${pcm16.length} samples)`);
-  } catch {
-    /* transient send failure — drop the frame, keep streaming */
+      console.info(`[bmw] → audio frame #${audioFrameCount} (${pcm16.length} samples)`);
+  } catch (err) {
+    // A send THROW (e.g. socket transitioned mid-send, buffer detached) is a real
+    // error — surface it (never an empty catch). Drop only this frame; keep streaming.
+    sendAudioErrors++;
+    if (sendAudioErrors === 1 || sendAudioErrors % 50 === 0)
+      console.error(`[bmw] audio frame send failed (${sendAudioErrors}):`, err);
   }
 }
 
-/** Reset the diagnostic audio-frame counter (call on stop so the next stream re-logs). */
+/** Reset the diagnostic audio-frame counters (call on start so the next stream re-logs). */
 export function resetAudioFrameCount(): void {
   audioFrameCount = 0;
+  droppedAudioFrames = 0;
+  idleAudioFrames = 0;
+  sendAudioErrors = 0;
+  resetAudioDropped();
+}
+
+/** Read-only snapshot of the audio-frame diagnostics (for tests / debugging). */
+export function getAudioDiagnostics(): {
+  sent: number;
+  dropped: number;
+  idle: number;
+  errors: number;
+} {
+  return {
+    sent: audioFrameCount,
+    dropped: droppedAudioFrames,
+    idle: idleAudioFrames,
+    errors: sendAudioErrors,
+  };
 }
 
 /** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
@@ -435,33 +515,67 @@ let socket: WebSocket | null = null;
 let wantUrl: string | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+// The connection FSM state (mirrored into agentStore for the UI). The pure
+// transition logic lives in ./connection so every transition is unit-testable.
+let connState: ConnectionState = "disconnected";
+
+/** Apply a connection lifecycle event: advance the FSM and reflect it in the UI. */
+function transition(event: ConnectionEvent, reason?: string | null): ConnectionState {
+  connState = nextConnectionState(connState, event);
+  setConnection(connState, { url: wantUrl, reason: reason ?? null });
+  return connState;
+}
+
+/** Current connection state (read-only; the UI observes the copy in agentStore). */
+export function getConnectionState(): ConnectionState {
+  return connState;
+}
+
 function openSocket(): void {
-  if (!wantUrl || typeof WebSocket === "undefined") return;
-  try {
-    socket = new WebSocket(wantUrl);
-  } catch (err) {
-    pushConsole("error", `bmw: WebSocket failed: ${String(err)}`);
-    scheduleReconnect();
+  if (!wantUrl || typeof WebSocket === "undefined") {
+    // Can't open — surface why instead of silently no-opping.
+    console.warn("[bmw] openSocket skipped — no URL or WebSocket unavailable");
     return;
   }
-  console.info(`[mic-debug] WebSocket connecting to ${wantUrl}…`);
-  pushConsole("event", `bmw: connecting to ${wantUrl}…`);
+  const url = wantUrl;
+  try {
+    socket = new WebSocket(url);
+  } catch (err) {
+    console.error(`[bmw] WebSocket construction failed for ${url}:`, err);
+    pushConsole("error", `bmw: WebSocket failed: ${String(err)}`);
+    transition("error", `WebSocket failed: ${String(err)}`);
+    scheduleReconnect();
+    transition("close"); // no live socket → we're now reconnecting
+    return;
+  }
+  transition("connect", `Connecting to ${url}…`);
+  console.info(`[bmw] WebSocket connecting to ${url}…`);
+  pushConsole("event", `bmw: connecting to ${url}…`);
   socket.onopen = () => {
-    console.info(`[mic-debug] WebSocket OPEN ${wantUrl}`);
-    pushConsole("event", `bmw: connected ${wantUrl}`);
+    console.info(`[bmw] WebSocket OPEN ${url}`);
+    pushConsole("event", `bmw: connected ${url}`);
+    transition("open", null);
   };
   socket.onmessage = (ev) => {
     if (typeof ev.data === "string") ingest(ev.data);
+    else {
+      // Binary inbound is unexpected on this stream (the emulator sends NDJSON
+      // text); surface rather than silently ignore.
+      console.warn("[bmw] ignored non-string inbound WebSocket message");
+      pushConsole("warn", "bmw: ignored non-string inbound message");
+    }
   };
   socket.onerror = () => {
-    console.error(`[mic-debug] WebSocket ERROR for ${wantUrl}`);
+    console.error(`[bmw] WebSocket ERROR for ${url}`);
     pushConsole("error", "bmw: socket error");
+    transition("error", "Socket error");
   };
   socket.onclose = () => {
     socket = null;
     if (wantUrl) {
-      console.warn(`[mic-debug] WebSocket CLOSED ${wantUrl} — retrying`);
-      pushConsole("event", "bmw: disconnected — retrying");
+      console.warn(`[bmw] WebSocket CLOSED ${url} — retrying`);
+      pushConsole("warn", "bmw: disconnected — retrying");
+      transition("close", "Disconnected — retrying");
       scheduleReconnect();
     }
   };
@@ -490,9 +604,13 @@ export function disconnect(): void {
     reconnectTimer = null;
   }
   if (socket) {
-    socket.onclose = null;
+    socket.onclose = null; // don't treat this deliberate close as a reconnect
+    socket.onerror = null;
+    socket.onopen = null;
+    socket.onmessage = null;
     socket.close();
     socket = null;
     pushConsole("event", "bmw: renderer disconnected");
   }
+  transition("disconnect", "Not connected");
 }
