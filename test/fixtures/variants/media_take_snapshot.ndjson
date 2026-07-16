@@ -1,0 +1,3 @@
+{"variant":"media_take_snapshot#0000","intent":"media_take_snapshot","base":true,"combo":[],"signature":"media_take_snapshot","events":[{"v":2,"event":"outcome","intent":"media_take_snapshot","result":"not_implemented","reason":null}]}
+{"variant":"media_take_snapshot#0001","intent":"media_take_snapshot","base":true,"combo":["action"],"signature":"media_take_snapshot|$action=PHOTO","events":[{"v":2,"event":"outcome","intent":"media_take_snapshot","result":"not_implemented","reason":null}]}
+{"variant":"media_take_snapshot#0002","intent":"media_take_snapshot","base":false,"combo":["action"],"signature":"media_take_snapshot|$action=VIDEO","events":[{"v":2,"event":"outcome","intent":"media_take_snapshot","result":"not_implemented","reason":null}]}

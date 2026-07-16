@@ -1,0 +1,1 @@
+{"variant":"nav_query_next_dest#0000","intent":"nav_query_next_dest","base":true,"combo":[],"signature":"nav_query_next_dest","events":[{"v":2,"event":"outcome","intent":"nav_query_next_dest","result":"read","reason":null}]}

@@ -1,0 +1,1 @@
+{"variant":"nav_query_distance#0000","intent":"nav_query_distance","base":true,"combo":[],"signature":"nav_query_distance","events":[{"v":2,"event":"outcome","intent":"nav_query_distance","result":"read","reason":null}]}
