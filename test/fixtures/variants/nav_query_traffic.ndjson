@@ -1,0 +1,1 @@
+{"variant":"nav_query_traffic#0000","intent":"nav_query_traffic","base":true,"combo":[],"signature":"nav_query_traffic","events":[{"v":2,"event":"outcome","intent":"nav_query_traffic","result":"read","reason":null}]}

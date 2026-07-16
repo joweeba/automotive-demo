@@ -12,12 +12,13 @@
 // + voice-status UI so the car visibly tracks the emulator. This is the web
 // equivalent of the planned Unity renderer (spec §4, Phase 4b).
 //
-// Four event types (spec §4.5), envelope `{ v, event }`, v=1, all values are
+// Event types (spec §4.5), envelope `{ v, event }`, v=1 or v=2, all values are
 // JSON strings ("true"/"20"/"OPEN"):
 //   snapshot     — full flattened state, always the first line
 //   state_change — { changes:[{path,from,to}], state_summary }
 //   animation    — { target, action, detail }  (physical actuation cue)
 //   activation   — { kind, detail }             (VAD / wake / endpoint)
+//   outcome      — { intent, result, reason }   (v2: the grounding verdict for a turn)
 //
 // This web sedan rig models a SUBSET of what a 3-series tracks. Mapped paths
 // drive the car; everything else (windows, sunroof, ambient color, drive mode,
@@ -36,24 +37,39 @@ import {
 } from "../state/vehicleCommands";
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
-import { setPhase, setTranscript, pushConsole } from "./agentStore";
+import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
 
-export const PROTOCOL_VERSION = 1;
+// The newest protocol version this renderer understands.
+export const PROTOCOL_VERSION = 2;
+// Versions we accept. v2 (assistant #179 + the emulator `--ui` bridge) adds the
+// `outcome` event and is additive over v1 (spec §4.5: additive evolution, ignore
+// unknown fields), so we still accept a v1 stream from an older emulator.
+const SUPPORTED_VERSIONS = new Set([1, 2]);
 
 /** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
 const HEAT_INFER_F = 74;
 
-// The emulator's 14-zone enum → this rig's three seat anchors (driver/passenger/rear).
-const ZONE_TO_SEAT: Record<string, SeatId> = {
-  DRIVER: "driver",
-  FRONT_LEFT: "driver",
-  PASSENGER: "passenger",
-  FRONT_RIGHT: "passenger",
-  REAR_LEFT: "rear",
-  REAR_RIGHT: "rear",
-  REAR_CENTER: "rear",
-  THIRD_ROW: "rear",
-  BACK: "rear",
+// The emulator's full 14-zone seat enum → this rig's three seat anchors
+// (driver/passenger/rear). MUST cover every zone value the model can emit for a
+// seat command — including the aggregates (ALL_CAR/FRONT/PASSENGERS) and the
+// bare-call default ALL_CAR — or a seat command lands on no anchor and is
+// silently dropped. Aggregates fan out to multiple anchors; the rig cannot split
+// left/right within a row, so PASSENGER_LEFT/RIGHT collapse to the passenger anchor.
+const ZONE_TO_SEAT: Record<string, SeatId[]> = {
+  DRIVER: ["driver"],
+  FRONT_LEFT: ["driver"],
+  PASSENGER: ["passenger"],
+  FRONT_RIGHT: ["passenger"],
+  PASSENGER_LEFT: ["passenger"],
+  PASSENGER_RIGHT: ["passenger"],
+  REAR_LEFT: ["rear"],
+  REAR_RIGHT: ["rear"],
+  REAR_CENTER: ["rear"],
+  THIRD_ROW: ["rear"],
+  BACK: ["rear"],
+  FRONT: ["driver", "passenger"],
+  PASSENGERS: ["passenger", "rear"],
+  ALL_CAR: ["driver", "passenger", "rear"],
 };
 
 // ── the mirror ──────────────────────────────────────────────────────────────
@@ -119,8 +135,12 @@ function applyClimate(): void {
   // Glow: BMW expresses heating via temperature (there is no "heat" mode intent),
   // so infer heat from a warm setpoint vs. the outside temp when AC/auto are off.
   const acOn = anyZone("climate.ac", truthy) || anyZone("climate.max_ac", truthy);
-  const autoOn = anyZone("climate.climate_auto", truthy);
-  const extF = parseTempF(mirror["info.exterior_temp"]);
+  // Emulator flatten() emits `climate.auto.<zone>` (car_toggle_climate_auto),
+  // NOT `climate.climate_auto` — see docs/emulator/command-taxonomy.md.
+  const autoOn = anyZone("climate.auto", truthy);
+  // Read-only vehicle info flattens as `info.<PROPERTY>` in the model's UPPER_SNAKE
+  // enum (docs/emulator/ui-integration-api.md), e.g. `info.EXTERIOR_TEMPERATURE`.
+  const extF = parseTempF(mirror["info.EXTERIOR_TEMPERATURE"]);
   let mode: Climate = "off";
   if (acOn) mode = "ac";
   else if (autoOn) mode = "auto";
@@ -131,8 +151,9 @@ function applyClimate(): void {
   const acc: Record<SeatId, SeatLevel> = { driver: 0, passenger: 0, rear: 0 };
   for (const [path, val] of Object.entries(mirror)) {
     if (!path.startsWith("climate.seat_heating.")) continue;
-    const seat = ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)];
-    if (seat) acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
+    for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
+      acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
+    }
   }
   (Object.keys(acc) as SeatId[]).forEach((seat) => setSeatHeat(seat, acc[seat]));
 }
@@ -161,7 +182,9 @@ function applyMedia(): void {
 }
 
 function applyEnvironment(): void {
-  const extF = parseTempF(mirror["info.exterior_temp"]);
+  // Canonical flatten path is `info.EXTERIOR_TEMPERATURE` (UPPER_SNAKE property),
+  // not `info.exterior_temp` — see docs/emulator/ui-integration-api.md.
+  const extF = parseTempF(mirror["info.EXTERIOR_TEMPERATURE"]);
   if (extF != null) setExternalTemp(Math.round(extF));
   // info.DATE / info.TIME / nav.gps are environmental truth; the web demo's Auto rules
   // run off the device clock, so we mirror but don't act on them.
@@ -231,11 +254,48 @@ function onActivation(evt: { kind?: string; detail?: string }): void {
   else if (/idle|reset|done|silence/.test(kind)) setPhase("idle");
 }
 
+// Human-readable labels for the v2 `outcome.result` enum.
+const OUTCOME_LABEL: Record<string, string> = {
+  applied: "applied",
+  read: "read",
+  rejected: "rejected",
+  not_equipped: "not equipped",
+  not_implemented: "not implemented",
+};
+
+function onOutcome(evt: { intent?: string; result?: string; reason?: string }): void {
+  // The v2 grounding verdict for a turn. For applied/read the visible change already
+  // arrived via state_change; this surfaces WHY a command did nothing — a feature this
+  // trim lacks (not_equipped) or one the emulator can't ground yet (not_implemented) —
+  // so it is visible in the console instead of silently ignored.
+  const intent = evt.intent ? String(evt.intent) : "(unknown)";
+  const result = String(evt.result ?? "");
+  const label = OUTCOME_LABEL[result] ?? result ?? "";
+  const reason = evt.reason ? ` — ${String(evt.reason)}` : "";
+  // Severity by outcome CLASS, not "anything that isn't applied is an error".
+  //  - applied / read           → event  (the visible change already arrived)
+  //  - not_equipped / not_impl. → info   (EXPECTED product states: this trim
+  //                                        lacks the feature, or the head-unit UI
+  //                                        doesn't cover it yet — surface, don't
+  //                                        red-error, or every gated command spews)
+  //  - rejected / unknown       → error  (a genuinely malformed / unmodeled call)
+  const level: LogLevel =
+    result === "applied" || result === "read"
+      ? "event"
+      : result === "not_equipped" || result === "not_implemented"
+        ? "info"
+        : "error";
+  pushConsole(level, `bmw ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
+}
+
 function dispatch(evt: unknown): void {
   if (evt == null || typeof evt !== "object") return;
   const e = evt as Record<string, unknown>;
-  if (e.v !== undefined && e.v !== PROTOCOL_VERSION) {
-    pushConsole("error", `bmw: refusing unknown protocol v=${String(e.v)} (support v=${PROTOCOL_VERSION})`);
+  if (e.v !== undefined && !SUPPORTED_VERSIONS.has(e.v as number)) {
+    pushConsole(
+      "error",
+      `bmw: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
+    );
     return;
   }
   switch (e.event) {
@@ -247,6 +307,8 @@ function dispatch(evt: unknown): void {
       return onAnimation(e as { target?: string; action?: string; detail?: string });
     case "activation":
       return onActivation(e as { kind?: string; detail?: string });
+    case "outcome":
+      return onOutcome(e as { intent?: string; result?: string; reason?: string });
     default:
       pushConsole("event", `bmw: ignored event "${String(e.event)}"`);
   }

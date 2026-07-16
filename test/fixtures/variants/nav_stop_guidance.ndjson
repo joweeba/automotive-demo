@@ -1,0 +1,1 @@
+{"variant":"nav_stop_guidance#0000","intent":"nav_stop_guidance","base":true,"combo":[],"signature":"nav_stop_guidance","events":[{"v":2,"event":"outcome","intent":"nav_stop_guidance","result":"applied","reason":null}]}

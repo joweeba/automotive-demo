@@ -1,0 +1,1 @@
+{"variant":"nav_query_time_remaining#0000","intent":"nav_query_time_remaining","base":true,"combo":[],"signature":"nav_query_time_remaining","events":[{"v":2,"event":"outcome","intent":"nav_query_time_remaining","result":"read","reason":null}]}
