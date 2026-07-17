@@ -24,6 +24,7 @@
 import { expect } from "vitest";
 import { getState } from "../src/state/vehicleState";
 import { getMusic, TRACKS } from "../src/state/musicStore";
+import { getFeatures } from "../src/state/featureStore";
 import { getAgentState } from "../src/agent/agentStore";
 import type { BrandConfig, SeatId } from "../src/brands/types";
 import { BMW } from "../src/brands/bmw";
@@ -239,6 +240,20 @@ export function makeContract(brand: BrandConfig): Contract {
         const idx = m["media.track_index"];
         if (idx !== undefined && !Number.isNaN(Number(idx)))
           expect(getMusic().index).toBe(Number(idx) % TRACKS.length);
+      },
+    },
+    {
+      // Generic long-tail channel: every `feature.<name>` grounds into the active-features
+      // panel (getFeatures()). Data-driven — one entry covers ANY feature name (known or
+      // not), so a valid grounded command is never silently dropped.
+      id: "feature.<name> → active-features panel",
+      match: (p) => p.startsWith("feature."),
+      check: (m) => {
+        const f = getFeatures();
+        for (const [path, val] of Object.entries(m)) {
+          if (path.startsWith("feature."))
+            expect(f[path.slice("feature.".length)]).toBe(val);
+        }
       },
     },
   ];

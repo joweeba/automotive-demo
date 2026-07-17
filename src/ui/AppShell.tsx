@@ -5,6 +5,7 @@ import { CameraViewTabs } from "./CameraViewTabs";
 import { MusicPlayer } from "./MusicPlayer";
 import { AgentFab } from "./AgentFab";
 import { AgentPanel } from "./agent/AgentPanel";
+import { ActiveFeaturesPanel } from "./ActiveFeaturesPanel";
 import { useAgent } from "../agent/agentStore";
 
 // Canvas background — the 3D viewport renders transparently on top of this.
@@ -60,6 +61,12 @@ export function AppShell() {
         />
 
         <Header />
+
+        {/* Active-features overlay: the generic `feature.*` channel (long-tail grounded
+            commands with no dedicated 3D affordance). Shows itself only when non-empty. */}
+        <div className="absolute left-5 top-[120px]">
+          <ActiveFeaturesPanel />
+        </div>
 
         {/* Camera-view switcher floats over the viewport in the base layout; it docks
             into the config panel top while the agent chat is open. */}

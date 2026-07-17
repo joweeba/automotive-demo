@@ -37,6 +37,7 @@ import {
 } from "../state/vehicleCommands";
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
+import { setFeatures, resetFeatures } from "../state/featureStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
 import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
@@ -172,6 +173,18 @@ function applyEnvironment(): void {
   // run off the device clock, so we mirror but don't act on them.
 }
 
+/** Reconcile the generic `feature.<name>` channel into the featureStore.
+ *  Data-driven: every `feature.*` path in the mirror lands in the active-features panel,
+ *  known or not — so any grounded long-tail command shows visible feedback and nothing is
+ *  silently dropped. (docs/emulator: `feature.<featureName> = on|off|<value>`.) */
+function applyFeatures(): void {
+  const next: Record<string, string> = {};
+  for (const [path, val] of Object.entries(mirror)) {
+    if (path.startsWith("feature.")) next[path.slice("feature.".length)] = val;
+  }
+  setFeatures(next);
+}
+
 // ── event dispatch ──────────────────────────────────────────────────────────
 
 function reconcile(paths: string[]): void {
@@ -180,8 +193,16 @@ function reconcile(paths: string[]): void {
   if (subs.has("lighting")) applyLighting();
   if (subs.has("media")) applyMedia();
   if (subs.has("info") || subs.has("nav") || subs.has("system")) applyEnvironment();
-  // Subsystems the web rig can't show yet — surface, don't drop (spec: no silent truncation).
   const lp = getActiveBrand().logPrefix;
+  if (subs.has("feature")) {
+    applyFeatures();
+    // A grounded long-tail feature: surface it (never an error — a valid grounded command).
+    for (const p of paths) {
+      if (p.startsWith("feature."))
+        pushConsole("tool", `${lp} ✦ ${p.slice("feature.".length)}=${mirror[p]}`);
+    }
+  }
+  // Subsystems the web rig can't show yet — surface, don't drop (spec: no silent truncation).
   for (const p of paths) {
     const top = p.split(".")[0];
     if (top === "body" || top === "drive" || top === "apps" || top === "comms")
@@ -200,6 +221,7 @@ function onSnapshot(state: Record<string, string>): void {
   applyLighting();
   applyMedia();
   applyEnvironment();
+  applyFeatures();
 }
 
 interface Change {
@@ -426,6 +448,7 @@ export function resetAudioFrameCount(): void {
  *  the next snapshot/state_change when the brand is unpinned. */
 export function reset(): void {
   mirror = {};
+  resetFeatures();
 }
 
 // ── WebSocket transport ─────────────────────────────────────────────────────

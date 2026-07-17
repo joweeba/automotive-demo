@@ -13,8 +13,9 @@
     "statement": 13
   },
   "outcomes": {
-    "not_implemented": 207,
+    "not_implemented": 203,
     "rejected": 66,
+    "applied": 4,
     "cloud_deferred": 2
   }
 }

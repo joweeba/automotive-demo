@@ -288,6 +288,18 @@ or a `…C` suffix is treated as Celsius → °F). Zones collapse to three seat 
 | `media.source` | sets the player "playing" |
 | `media.track_index` | selects the track (mod playlist length) |
 | `info.EXTERIOR_TEMPERATURE` | outside temperature (drives the Auto rules) |
+| `feature.<name>` | generic **Active Features** panel entry (name + on/off/value) — the long-tail channel |
+
+**The generic `feature.<name>` channel.** The emulator grounds the long tail of cabin
+features (the ones the typed schema above doesn't model — e.g. `feature.ambientLight=on`,
+`feature.massage=on`, `feature.seatHeating=HIGH`, `feature.soundWorld=fireplace`) onto a
+single generic channel. These are rendered **data-driven** in the on-screen **Active
+Features** panel (`src/ui/ActiveFeaturesPanel.tsx`, backed by `src/state/featureStore.ts`):
+name + on/off/value, humanized. An **unknown** feature name still renders generically — it
+is never dropped and never logged as an error. In the shared UI contract (`test/uiContract.ts`)
+`feature.*` is **MAPPED** (to the panel), not ignore-listed — so a grounded feature is
+covered by the same "no silent drop" oracle as every 3D affordance. This channel is
+brand-agnostic (BMW + Mercedes flow through the same path).
 
 **Inferred:** the `bmw_new` vocabulary has **no "heat" mode** (heating is expressed via a
 warmer temperature setpoint), so the red **heat** glow is inferred when AC/auto are off and

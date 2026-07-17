@@ -18,6 +18,16 @@
 # The committed fixtures are what test/mercedes.integration.test.ts consumes — the test
 # does NOT need the emulator or the eval data at run time (they are vendored, like BMW).
 #
+# GENERIC `feature.*` CHANNEL (pending emulator branch). The UI renders a generic
+# `feature.<name> = on|off|<value>` channel for the long-tail cabin features the typed
+# schema doesn't model (see src/state/featureStore.ts + docs/emulator/mbis-command-taxonomy.md).
+# The emulator on `main` does NOT emit `feature.*` yet — most valid MBIS intents still
+# ground to `not_implemented` (see the outcome histogram in manifest.json). Once the
+# emulator agent's branch (every valid MBIS intent → a vehicle-state change, incl. the
+# feature.* channel) lands, RE-RUN this generator against that emulator and the corpus will
+# carry real feature.* paths. Until then the feature.* channel is covered by SYNTHETIC,
+# hand-authored fixtures in test/feature.integration.test.ts (documented there).
+#
 # Usage:
 #   python3 tools/gen_mercedes_golden.py [OUT_DIR]
 # Env overrides:
