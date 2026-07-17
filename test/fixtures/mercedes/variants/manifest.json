@@ -1,0 +1,20 @@
+{
+  "count": 275,
+  "domains": {
+    "addressBook": 11,
+    "carFunction": 71,
+    "conversation": 2,
+    "generic": 10,
+    "guiScreen": 5,
+    "media": 10,
+    "message": 1,
+    "navigation": 92,
+    "phone": 60,
+    "statement": 13
+  },
+  "outcomes": {
+    "not_implemented": 207,
+    "rejected": 66,
+    "cloud_deferred": 2
+  }
+}

@@ -10,18 +10,23 @@
 //   (c) every emitted state path is EITHER mapped OR on the explicit
 //       KNOWN_UNRENDERED ignore-list (a new/dropped subsystem can't pass silently).
 //
-// Consumed by BOTH:
-//   • test/variants.integration.test.ts  — in-process golden fixture replay (proves
-//     the grounding→renderer MAPPING).
-//   • test/e2e/liveE2E.test.ts           — LIVE cross-process replay through the real
-//     emulator + WebSocket (proves the TRANSPORT + inbound audio).
-// Sharing it here is what keeps the live path asserting the SAME contract the golden
-// regression uses, with no drift.
+// BRAND-PARAMETERIZED. The renderer reads the ACTIVE brand's config (zone→anchor table,
+// heat-inference threshold) from src/brands; the oracle must use the SAME brand so it
+// never drifts from the renderer. `makeContract(brand)` builds the oracle for a brand;
+// the top-level exports are the BMW-bound instance (so the pre-existing BMW golden
+// regression imports them unchanged). The Mercedes regression calls makeContract(MERCEDES).
+//
+// Consumed by:
+//   • test/variants.integration.test.ts    — BMW in-process golden fixture replay.
+//   • test/mercedes.integration.test.ts     — Mercedes (MBIS) golden fixture replay.
+//   • test/e2e/liveE2E.test.ts              — LIVE cross-process replay (BMW).
 // ---------------------------------------------------------------------------
 import { expect } from "vitest";
 import { getState } from "../src/state/vehicleState";
 import { getMusic, TRACKS } from "../src/state/musicStore";
 import { getAgentState } from "../src/agent/agentStore";
+import type { BrandConfig, SeatId } from "../src/brands/types";
+import { BMW } from "../src/brands/bmw";
 
 // ── value parsing (independent oracle — mirrors the renderer's contract) ─────
 export const truthy = (v?: string) =>
@@ -57,27 +62,6 @@ export function anyZone(
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 
-type SeatId = "driver" | "passenger" | "rear";
-// Independent oracle copy of the renderer's zone→seat-anchor table. Must cover ALL 14
-// seat_heating zone enum values (incl. the aggregates ALL_CAR/FRONT/PASSENGERS and the
-// bare-call default ALL_CAR) or a mapped seat-heating command is silently dropped.
-const ZONE_TO_SEAT: Record<string, SeatId[]> = {
-  DRIVER: ["driver"],
-  FRONT_LEFT: ["driver"],
-  PASSENGER: ["passenger"],
-  FRONT_RIGHT: ["passenger"],
-  PASSENGER_LEFT: ["passenger"],
-  PASSENGER_RIGHT: ["passenger"],
-  REAR_LEFT: ["rear"],
-  REAR_RIGHT: ["rear"],
-  REAR_CENTER: ["rear"],
-  THIRD_ROW: ["rear"],
-  BACK: ["rear"],
-  FRONT: ["driver", "passenger"],
-  PASSENGERS: ["passenger", "rear"],
-  ALL_CAR: ["driver", "passenger", "rear"],
-};
-
 function seatLevel(v?: string): 0 | 1 | 2 | 3 {
   switch ((v ?? "").toUpperCase()) {
     case "LOW":
@@ -92,124 +76,10 @@ function seatLevel(v?: string): 0 | 1 | 2 | 3 {
   }
 }
 
-function checkClimateMode(m: Record<string, string>): void {
-  const acOn = anyZone(m, "climate.ac", truthy) || anyZone(m, "climate.max_ac", truthy);
-  const autoOn = anyZone(m, "climate.auto", truthy);
-  const tF = parseTempF(
-    firstZone(m, "climate.temperature", ["DRIVER", "ALL_CAR", "FRONT", "PASSENGER"]),
-  );
-  const extF = parseTempF(m["info.EXTERIOR_TEMPERATURE"]);
-  let mode: "off" | "auto" | "ac" | "heat" = "off";
-  if (acOn) mode = "ac";
-  else if (autoOn) mode = "auto";
-  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= 74)) mode = "heat";
-  expect(getState().climate).toBe(mode);
-}
-
-// ── (b) MAPPED paths + the oracle that asserts getState() reflects them ──────
-export interface Mapped {
-  id: string;
-  match: (p: string) => boolean;
-  check: (m: Record<string, string>) => void;
-}
-export const MAPPED: Mapped[] = [
-  {
-    id: "climate.temperature.<zone> → temperature",
-    match: (p) => p.startsWith("climate.temperature.") && p !== "climate.temperature_unit",
-    check: (m) => {
-      const tF = parseTempF(
-        firstZone(m, "climate.temperature", ["DRIVER", "ALL_CAR", "FRONT", "PASSENGER"]),
-      );
-      if (tF != null) expect(getState().temperature).toBe(clamp(Math.round(tF), 60, 85));
-    },
-  },
-  {
-    id: "climate.fan_speed.<zone> → fan",
-    match: (p) => p.startsWith("climate.fan_speed."),
-    check: (m) =>
-      expect(getState().fan).toBe(
-        anyZone(m, "climate.fan_speed", (v) => v !== "OFF" && v !== "0" && v !== ""),
-      ),
-  },
-  {
-    id: "climate.ac.<zone> → climate=ac",
-    match: (p) => p.startsWith("climate.ac."),
-    check: (m) => checkClimateMode(m),
-  },
-  {
-    id: "climate.max_ac.<zone> → climate=ac",
-    match: (p) => p.startsWith("climate.max_ac."),
-    check: (m) => checkClimateMode(m),
-  },
-  {
-    id: "climate.auto.<zone> → climate=auto",
-    match: (p) => p.startsWith("climate.auto."),
-    check: (m) => checkClimateMode(m),
-  },
-  {
-    id: "climate.seat_heating.<zone> → seatHeat",
-    match: (p) => p.startsWith("climate.seat_heating."),
-    check: (m) => {
-      const acc: Record<SeatId, 0 | 1 | 2 | 3> = { driver: 0, passenger: 0, rear: 0 };
-      for (const [path, val] of Object.entries(m)) {
-        if (!path.startsWith("climate.seat_heating.")) continue;
-        for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
-          acc[seat] = Math.max(acc[seat], seatLevel(val)) as 0 | 1 | 2 | 3;
-        }
-      }
-      (Object.keys(acc) as SeatId[]).forEach((s) => expect(getState().seatHeat[s]).toBe(acc[s]));
-    },
-  },
-  {
-    id: "info.EXTERIOR_TEMPERATURE → environment.externalTemp",
-    match: (p) => p === "info.EXTERIOR_TEMPERATURE",
-    check: (m) => {
-      const extF = parseTempF(m["info.EXTERIOR_TEMPERATURE"]);
-      if (extF != null) expect(getState().environment.externalTemp).toBe(clamp(Math.round(extF), 20, 110));
-    },
-  },
-  {
-    id: "lighting.light.{DRIVING,DAYTIME} → head/taillights",
-    match: (p) => p === "lighting.light.DRIVING" || p === "lighting.light.DAYTIME",
-    check: (m) => {
-      const on = truthy(m["lighting.light.DRIVING"]) || truthy(m["lighting.light.DAYTIME"]);
-      expect(getState().headlights).toBe(on ? "on" : "off");
-      expect(getState().taillights).toBe(on ? "on" : "off");
-    },
-  },
-  {
-    id: "media.muted / media.volume → volume",
-    match: (p) => p === "media.muted" || p === "media.volume",
-    check: (m) => {
-      const muted = truthy(m["media.muted"]);
-      const volRaw = m["media.volume"];
-      if (volRaw !== undefined) {
-        const v = Math.round(Number(volRaw));
-        if (!Number.isNaN(v)) expect(getMusic().volume).toBe(muted ? 0 : v);
-      } else if (muted) {
-        expect(getMusic().volume).toBe(0);
-      }
-    },
-  },
-  {
-    id: "media.source → playing",
-    match: (p) => p === "media.source",
-    check: (m) => {
-      if (m["media.source"]) expect(getMusic().playing).toBe(true);
-    },
-  },
-  {
-    id: "media.track_index → track index",
-    match: (p) => p === "media.track_index",
-    check: (m) => {
-      const idx = m["media.track_index"];
-      if (idx !== undefined && !Number.isNaN(Number(idx)))
-        expect(getMusic().index).toBe(Number(idx) % TRACKS.length);
-    },
-  },
-];
-
 // ── (c) KNOWN_UNRENDERED — emitted paths with no 3D representation (yet) ─────
+// Brand-agnostic: both cabins emit the same flattened VehicleState schema, so the
+// ignore-list is prefix-based and shared. (Mercedes' lowercase zone keys still match the
+// same `<prefix>.` rules as BMW's uppercase ones.)
 export interface Ignored {
   match: (p: string) => boolean;
   reason: string;
@@ -244,51 +114,182 @@ export const KNOWN_UNRENDERED: Ignored[] = [
   { match: (p) => p.startsWith("system."), reason: "HMI unit conventions (12H/24H, mile/km), not the 3D car rig" },
 ];
 
-export function isMapped(p: string): boolean {
-  return MAPPED.some((mp) => mp.match(p));
+// ── (b) MAPPED paths + the oracle that asserts getState() reflects them ──────
+export interface Mapped {
+  id: string;
+  match: (p: string) => boolean;
+  check: (m: Record<string, string>) => void;
 }
-export function ignoreReason(p: string): string | null {
-  return KNOWN_UNRENDERED.find((ig) => ig.match(p))?.reason ?? null;
+
+/** Full three-part contract oracle for one brand. */
+export interface Contract {
+  brand: BrandConfig;
+  MAPPED: Mapped[];
+  KNOWN_UNRENDERED: Ignored[];
+  isMapped: (p: string) => boolean;
+  ignoreReason: (p: string) => string | null;
+  classify: (p: string) => "mapped" | "ignored" | "unclassified";
+  assertContract: (mirror: Record<string, string>, paths: Iterable<string>, opts: { rejected: boolean }) => void;
 }
-export function classify(p: string): "mapped" | "ignored" | "unclassified" {
-  if (isMapped(p)) return "mapped";
-  return ignoreReason(p) ? "ignored" : "unclassified";
+
+/** Build the contract oracle bound to `brand`'s zone→anchor table + heat threshold. */
+export function makeContract(brand: BrandConfig): Contract {
+  const zoneToSeat = brand.zoneToSeat;
+
+  function checkClimateMode(m: Record<string, string>): void {
+    const acOn = anyZone(m, "climate.ac", truthy) || anyZone(m, "climate.max_ac", truthy);
+    const autoOn = anyZone(m, "climate.auto", truthy);
+    const tF = parseTempF(firstZone(m, "climate.temperature", brand.tempZones));
+    const extF = parseTempF(m["info.EXTERIOR_TEMPERATURE"]);
+    let mode: "off" | "auto" | "ac" | "heat" = "off";
+    if (acOn) mode = "ac";
+    else if (autoOn) mode = "auto";
+    else if (tF != null && ((extF != null && tF > extF + 2) || tF >= brand.heatInferF)) mode = "heat";
+    expect(getState().climate).toBe(mode);
+  }
+
+  const MAPPED: Mapped[] = [
+    {
+      id: "climate.temperature.<zone> → temperature",
+      match: (p) => p.startsWith("climate.temperature.") && p !== "climate.temperature_unit",
+      check: (m) => {
+        const tF = parseTempF(firstZone(m, "climate.temperature", brand.tempZones));
+        if (tF != null) expect(getState().temperature).toBe(clamp(Math.round(tF), 60, 85));
+      },
+    },
+    {
+      id: "climate.fan_speed.<zone> → fan",
+      match: (p) => p.startsWith("climate.fan_speed."),
+      check: (m) =>
+        expect(getState().fan).toBe(
+          anyZone(m, "climate.fan_speed", (v) => v !== "OFF" && v !== "0" && v !== ""),
+        ),
+    },
+    {
+      id: "climate.ac.<zone> → climate=ac",
+      match: (p) => p.startsWith("climate.ac."),
+      check: (m) => checkClimateMode(m),
+    },
+    {
+      id: "climate.max_ac.<zone> → climate=ac",
+      match: (p) => p.startsWith("climate.max_ac."),
+      check: (m) => checkClimateMode(m),
+    },
+    {
+      id: "climate.auto.<zone> → climate=auto",
+      match: (p) => p.startsWith("climate.auto."),
+      check: (m) => checkClimateMode(m),
+    },
+    {
+      id: "climate.seat_heating.<zone> → seatHeat",
+      match: (p) => p.startsWith("climate.seat_heating."),
+      check: (m) => {
+        const acc: Record<SeatId, 0 | 1 | 2 | 3> = { driver: 0, passenger: 0, rear: 0 };
+        for (const [path, val] of Object.entries(m)) {
+          if (!path.startsWith("climate.seat_heating.")) continue;
+          for (const seat of zoneToSeat[path.slice("climate.seat_heating.".length)] ?? []) {
+            acc[seat] = Math.max(acc[seat], seatLevel(val)) as 0 | 1 | 2 | 3;
+          }
+        }
+        (Object.keys(acc) as SeatId[]).forEach((s) => expect(getState().seatHeat[s]).toBe(acc[s]));
+      },
+    },
+    {
+      id: "info.EXTERIOR_TEMPERATURE → environment.externalTemp",
+      match: (p) => p === "info.EXTERIOR_TEMPERATURE",
+      check: (m) => {
+        const extF = parseTempF(m["info.EXTERIOR_TEMPERATURE"]);
+        if (extF != null) expect(getState().environment.externalTemp).toBe(clamp(Math.round(extF), 20, 110));
+      },
+    },
+    {
+      id: "lighting.light.{DRIVING,DAYTIME} → head/taillights",
+      match: (p) => p === "lighting.light.DRIVING" || p === "lighting.light.DAYTIME",
+      check: (m) => {
+        const on = truthy(m["lighting.light.DRIVING"]) || truthy(m["lighting.light.DAYTIME"]);
+        expect(getState().headlights).toBe(on ? "on" : "off");
+        expect(getState().taillights).toBe(on ? "on" : "off");
+      },
+    },
+    {
+      id: "media.muted / media.volume → volume",
+      match: (p) => p === "media.muted" || p === "media.volume",
+      check: (m) => {
+        const muted = truthy(m["media.muted"]);
+        const volRaw = m["media.volume"];
+        if (volRaw !== undefined) {
+          const v = Math.round(Number(volRaw));
+          if (!Number.isNaN(v)) expect(getMusic().volume).toBe(muted ? 0 : v);
+        } else if (muted) {
+          expect(getMusic().volume).toBe(0);
+        }
+      },
+    },
+    {
+      id: "media.source → playing",
+      match: (p) => p === "media.source",
+      check: (m) => {
+        if (m["media.source"]) expect(getMusic().playing).toBe(true);
+      },
+    },
+    {
+      id: "media.track_index → track index",
+      match: (p) => p === "media.track_index",
+      check: (m) => {
+        const idx = m["media.track_index"];
+        if (idx !== undefined && !Number.isNaN(Number(idx)))
+          expect(getMusic().index).toBe(Number(idx) % TRACKS.length);
+      },
+    },
+  ];
+
+  const isMapped = (p: string) => MAPPED.some((mp) => mp.match(p));
+  const ignoreReason = (p: string) => KNOWN_UNRENDERED.find((ig) => ig.match(p))?.reason ?? null;
+  const classify = (p: string): "mapped" | "ignored" | "unclassified" => {
+    if (isMapped(p)) return "mapped";
+    return ignoreReason(p) ? "ignored" : "unclassified";
+  };
+
+  function assertContract(
+    mirror: Record<string, string>,
+    paths: Iterable<string>,
+    opts: { rejected: boolean },
+  ): void {
+    const pathList = [...paths];
+
+    // (a) zero error-level output for a non-rejected turn.
+    if (!opts.rejected) expect(errorLines()).toEqual([]);
+
+    // (b) each mapped path emitted → its oracle asserts getState()/getMusic() reflects it.
+    const ran = new Set<string>();
+    for (const p of pathList) {
+      for (const mp of MAPPED) {
+        if (mp.match(p) && !ran.has(mp.id)) {
+          ran.add(mp.id);
+          mp.check(mirror);
+        }
+      }
+    }
+
+    // (c) every emitted path is mapped or explicitly ignore-listed.
+    const unclassified = pathList.filter((p) => classify(p) === "unclassified");
+    expect(unclassified, `unclassified emitted paths: ${unclassified.join(", ")}`).toEqual([]);
+  }
+
+  return { brand, MAPPED, KNOWN_UNRENDERED, isMapped, ignoreReason, classify, assertContract };
 }
+
+// ── BMW-bound instance: the top-level exports the pre-existing BMW regression imports ──
+const bmwContract = makeContract(BMW);
+export const MAPPED = bmwContract.MAPPED;
+export const isMapped = bmwContract.isMapped;
+export const ignoreReason = bmwContract.ignoreReason;
+export const classify = bmwContract.classify;
+export const assertContract = bmwContract.assertContract;
 
 /** The current error-level console lines (should be empty for a non-rejected turn). */
 export function errorLines(): string[] {
   return getAgentState()
     .consoleLog.filter((e) => e.level === "error")
     .map((e) => e.text);
-}
-
-/**
- * Assert the full (a)+(b)+(c) contract for a set of emitted paths against the current
- * renderer mirror + UI state. `rejected` relaxes (a) for a genuine `rejected` outcome
- * (allowed to be error-level). Shared by the in-process and live regressions.
- */
-export function assertContract(
-  mirror: Record<string, string>,
-  paths: Iterable<string>,
-  opts: { rejected: boolean },
-): void {
-  const pathList = [...paths];
-
-  // (a) zero error-level output for a non-rejected turn.
-  if (!opts.rejected) expect(errorLines()).toEqual([]);
-
-  // (b) each mapped path emitted → its oracle asserts getState()/getMusic() reflects it.
-  const ran = new Set<string>();
-  for (const p of pathList) {
-    for (const mp of MAPPED) {
-      if (mp.match(p) && !ran.has(mp.id)) {
-        ran.add(mp.id);
-        mp.check(mirror);
-      }
-    }
-  }
-
-  // (c) every emitted path is mapped or explicitly ignore-listed.
-  const unclassified = pathList.filter((p) => classify(p) === "unclassified");
-  expect(unclassified, `unclassified emitted paths: ${unclassified.join(", ")}`).toEqual([]);
 }

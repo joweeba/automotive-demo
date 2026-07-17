@@ -38,6 +38,7 @@ import {
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
+import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
 // The newest protocol version this renderer understands.
 export const PROTOCOL_VERSION = 2;
@@ -46,31 +47,10 @@ export const PROTOCOL_VERSION = 2;
 // unknown fields), so we still accept a v1 stream from an older emulator.
 const SUPPORTED_VERSIONS = new Set([1, 2]);
 
-/** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
-const HEAT_INFER_F = 74;
-
-// The emulator's full 14-zone seat enum → this rig's three seat anchors
-// (driver/passenger/rear). MUST cover every zone value the model can emit for a
-// seat command — including the aggregates (ALL_CAR/FRONT/PASSENGERS) and the
-// bare-call default ALL_CAR — or a seat command lands on no anchor and is
-// silently dropped. Aggregates fan out to multiple anchors; the rig cannot split
-// left/right within a row, so PASSENGER_LEFT/RIGHT collapse to the passenger anchor.
-const ZONE_TO_SEAT: Record<string, SeatId[]> = {
-  DRIVER: ["driver"],
-  FRONT_LEFT: ["driver"],
-  PASSENGER: ["passenger"],
-  FRONT_RIGHT: ["passenger"],
-  PASSENGER_LEFT: ["passenger"],
-  PASSENGER_RIGHT: ["passenger"],
-  REAR_LEFT: ["rear"],
-  REAR_RIGHT: ["rear"],
-  REAR_CENTER: ["rear"],
-  THIRD_ROW: ["rear"],
-  BACK: ["rear"],
-  FRONT: ["driver", "passenger"],
-  PASSENGERS: ["passenger", "rear"],
-  ALL_CAR: ["driver", "passenger", "rear"],
-};
+// The zone→seat-anchor table and the "heat"-inference threshold are now BRAND config
+// (src/brands/*). The renderer reads the ACTIVE brand's config on every apply so the same
+// pipeline renders BMW (uppercase bmw_new zones) or Mercedes (lowercase MBIS zones); see
+// getActiveBrand() / autoDetectBrand(). Nothing brand-specific is hard-coded below.
 
 // ── the mirror ──────────────────────────────────────────────────────────────
 // A local copy of the emulator's flattened state (canonical VehicleState::flatten
@@ -127,7 +107,8 @@ function anyZone(prefix: string, pred: (v: string) => boolean): boolean {
 // ── subsystem appliers (read the whole mirror, idempotent) ──────────────────
 
 function applyClimate(): void {
-  const tF = parseTempF(firstZone("climate.temperature", ["DRIVER", "ALL_CAR", "FRONT", "PASSENGER"]));
+  const brand = getActiveBrand();
+  const tF = parseTempF(firstZone("climate.temperature", brand.tempZones));
   if (tF != null) setTemperature(Math.round(tF));
 
   setFan(anyZone("climate.fan_speed", (v) => v !== "OFF" && v !== "0" && v !== ""));
@@ -144,14 +125,15 @@ function applyClimate(): void {
   let mode: Climate = "off";
   if (acOn) mode = "ac";
   else if (autoOn) mode = "auto";
-  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= HEAT_INFER_F)) mode = "heat";
+  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= brand.heatInferF)) mode = "heat";
   setClimate(mode);
 
   // Seat heating: aggregate the mapped zones to the three seat anchors (take the max).
+  // The zone→anchor table is the ACTIVE brand's (BMW uppercase / Mercedes MBIS lowercase).
   const acc: Record<SeatId, SeatLevel> = { driver: 0, passenger: 0, rear: 0 };
   for (const [path, val] of Object.entries(mirror)) {
     if (!path.startsWith("climate.seat_heating.")) continue;
-    for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
+    for (const seat of brand.zoneToSeat[path.slice("climate.seat_heating.".length)] ?? []) {
       acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
     }
   }
@@ -199,16 +181,21 @@ function reconcile(paths: string[]): void {
   if (subs.has("media")) applyMedia();
   if (subs.has("info") || subs.has("nav") || subs.has("system")) applyEnvironment();
   // Subsystems the web rig can't show yet — surface, don't drop (spec: no silent truncation).
+  const lp = getActiveBrand().logPrefix;
   for (const p of paths) {
     const top = p.split(".")[0];
     if (top === "body" || top === "drive" || top === "apps" || top === "comms")
-      pushConsole("info", `bmw: ${p}=${mirror[p]} (no web rig mapping)`);
+      pushConsole("info", `${lp}: ${p}=${mirror[p]} (no web rig mapping)`);
   }
 }
 
 function onSnapshot(state: Record<string, string>): void {
   mirror = { ...state };
-  pushConsole("event", `bmw ⬒ snapshot — ${Object.keys(mirror).length} state paths`);
+  // Re-select the brand from the fresh mirror (unless `?brand=` pinned it). The snapshot
+  // alone usually looks brand-neutral (engine boot default); the boot reconcile below
+  // reveals the Mercedes markers. Safe to call on every snapshot (idempotent).
+  autoDetectBrand(mirror);
+  pushConsole("event", `${getActiveBrand().logPrefix} ⬒ snapshot — ${Object.keys(mirror).length} state paths`);
   applyClimate();
   applyLighting();
   applyMedia();
@@ -223,12 +210,16 @@ interface Change {
 
 function onStateChange(changes: Change[]): void {
   const paths: string[] = [];
+  const lp = getActiveBrand().logPrefix;
   for (const c of changes) {
     if (!c || typeof c.path !== "string") continue;
     mirror[c.path] = c.to;
     paths.push(c.path);
-    pushConsole("tool", `bmw Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
+    pushConsole("tool", `${lp} Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
   }
+  // The boot reconcile is where the Mercedes markers (W1K VIN, lowercase MBIS zone keys)
+  // first appear, so re-detect here too (no-op when `?brand=` pinned the brand).
+  autoDetectBrand(mirror);
   reconcile(paths);
 }
 
@@ -236,13 +227,13 @@ function onAnimation(evt: { target?: string; action?: string; detail?: string })
   // The physical-actuation cue for the turn's command; the visual change already
   // arrived via state_change, so we log it as a trace marker.
   const parts = [evt.target, evt.action].filter(Boolean).join(".");
-  pushConsole("event", `bmw ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
+  pushConsole("event", `${getActiveBrand().logPrefix} ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
 }
 
 function onActivation(evt: { kind?: string; detail?: string }): void {
   const kind = String(evt.kind ?? "").toLowerCase();
   const detail = evt.detail ? String(evt.detail) : "";
-  pushConsole("event", `bmw ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
+  pushConsole("event", `${getActiveBrand().logPrefix} ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
   if (/wake/.test(kind)) setPhase("wake");
   else if (/vad|voice|speech|activity/.test(kind)) {
     if (detail) setTranscript(detail);
@@ -254,38 +245,45 @@ function onActivation(evt: { kind?: string; detail?: string }): void {
   else if (/idle|reset|done|silence/.test(kind)) setPhase("idle");
 }
 
-// Human-readable labels for the v2 `outcome.result` enum.
+// Human-readable labels for the v2 `outcome.result` enum. `cloud_deferred` is the
+// Mercedes/MBIS class (the request is an online/cloud capability, not a cabin action);
+// BMW never emits it, so adding it here is additive and brand-safe.
 const OUTCOME_LABEL: Record<string, string> = {
   applied: "applied",
   read: "read",
   rejected: "rejected",
   not_equipped: "not equipped",
   not_implemented: "not implemented",
+  cloud_deferred: "cloud deferred",
 };
+
+// Outcome classes that are EXPECTED, non-error product states (surface, don't red-error).
+const OUTCOME_INFO = new Set(["not_equipped", "not_implemented", "cloud_deferred"]);
 
 function onOutcome(evt: { intent?: string; result?: string; reason?: string }): void {
   // The v2 grounding verdict for a turn. For applied/read the visible change already
   // arrived via state_change; this surfaces WHY a command did nothing — a feature this
-  // trim lacks (not_equipped) or one the emulator can't ground yet (not_implemented) —
-  // so it is visible in the console instead of silently ignored.
+  // trim lacks (not_equipped), one the cabin can't ground yet (not_implemented), or a
+  // cloud/online request deferred off-device (cloud_deferred) — so it is visible in the
+  // console instead of silently ignored.
   const intent = evt.intent ? String(evt.intent) : "(unknown)";
   const result = String(evt.result ?? "");
   const label = OUTCOME_LABEL[result] ?? result ?? "";
   const reason = evt.reason ? ` — ${String(evt.reason)}` : "";
   // Severity by outcome CLASS, not "anything that isn't applied is an error".
-  //  - applied / read           → event  (the visible change already arrived)
-  //  - not_equipped / not_impl. → info   (EXPECTED product states: this trim
-  //                                        lacks the feature, or the head-unit UI
-  //                                        doesn't cover it yet — surface, don't
-  //                                        red-error, or every gated command spews)
-  //  - rejected / unknown       → error  (a genuinely malformed / unmodeled call)
+  //  - applied / read                            → event  (the visible change arrived)
+  //  - not_equipped / not_impl. / cloud_deferred → info   (EXPECTED product states —
+  //                                                 surface, don't red-error, or every
+  //                                                 gated/deferred command spews)
+  //  - rejected / unknown                        → error  (a genuinely malformed /
+  //                                                 unmodeled / out-of-domain call)
   const level: LogLevel =
     result === "applied" || result === "read"
       ? "event"
-      : result === "not_equipped" || result === "not_implemented"
+      : OUTCOME_INFO.has(result)
         ? "info"
         : "error";
-  pushConsole(level, `bmw ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
+  pushConsole(level, `${getActiveBrand().logPrefix} ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
 }
 
 function dispatch(evt: unknown): void {
@@ -294,7 +292,7 @@ function dispatch(evt: unknown): void {
   if (e.v !== undefined && !SUPPORTED_VERSIONS.has(e.v as number)) {
     pushConsole(
       "error",
-      `bmw: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
+      `${getActiveBrand().logPrefix}: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
     );
     return;
   }
@@ -310,7 +308,7 @@ function dispatch(evt: unknown): void {
     case "outcome":
       return onOutcome(e as { intent?: string; result?: string; reason?: string });
     default:
-      pushConsole("event", `bmw: ignored event "${String(e.event)}"`);
+      pushConsole("event", `${getActiveBrand().logPrefix}: ignored event "${String(e.event)}"`);
   }
 }
 
@@ -323,7 +321,7 @@ export function ingest(data: string | object): void {
     try {
       dispatch(JSON.parse(t));
     } catch {
-      pushConsole("error", `bmw: unparseable line: ${t.slice(0, 80)}`);
+      pushConsole("error", `${getActiveBrand().logPrefix}: unparseable line: ${t.slice(0, 80)}`);
     }
   }
 }
@@ -421,7 +419,11 @@ export function resetAudioFrameCount(): void {
   audioFrameCount = 0;
 }
 
-/** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
+/** Clear the mirror (e.g. before reconnecting to a fresh emulator). Deliberately does NOT
+ *  touch the active brand: a `?brand=` pin (and an already auto-detected brand) must
+ *  SURVIVE a reconnect — the browser reads `?brand=` only once at install. Tests that want
+ *  a clean brand state call resetBrand() explicitly. autoDetectBrand() still re-selects on
+ *  the next snapshot/state_change when the brand is unpinned. */
 export function reset(): void {
   mirror = {};
 }

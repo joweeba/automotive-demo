@@ -1,0 +1,2 @@
+{"signature": "conversation.cancel", "intent": "conversation.cancel", "domain": "conversation", "events": [{"v": 2, "event": "outcome", "intent": "conversation.cancel", "result": "not_implemented", "reason": null}]}
+{"signature": "conversation.help", "intent": "conversation.help", "domain": "conversation", "events": [{"v": 2, "event": "outcome", "intent": "conversation.help", "result": "not_implemented", "reason": null}]}
