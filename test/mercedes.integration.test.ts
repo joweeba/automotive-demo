@@ -246,11 +246,17 @@ describe("Mercedes eval-gold corpus replay", () => {
     }
   });
 
-  it("exercises the cloud_deferred + not_implemented + rejected classes", () => {
+  it("exercises the grounded outcome classes (applied/read/cloud_deferred/rejected)", () => {
+    // Since the emulator grounds ALL valid MBIS intents, the corpus no longer contains
+    // `not_implemented` (every valid intent now Applies/Reads); `rejected` remains for
+    // the version-skew eval golds the 0608 collection doesn't accept. The renderer still
+    // HANDLES not_implemented if it ever appears (see the outcome-class unit suite); this
+    // corpus assertion tracks what the ground-all emulator actually emits.
     const seen = new Set<string>();
     for (const v of VARIANTS)
       for (const e of v.events) if (e.event === "outcome") seen.add(String(e.result));
-    for (const cls of ["cloud_deferred", "not_implemented", "rejected"]) expect(seen).toContain(cls);
+    for (const cls of ["applied", "read", "cloud_deferred", "rejected"]) expect(seen).toContain(cls);
+    expect(seen).not.toContain("not_implemented");
   });
 
   beforeEach(() => {
