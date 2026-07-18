@@ -148,6 +148,19 @@
   animation: mic-rec 1.1s ease-in-out infinite;
 }
 
+/* Front-end signal indicators — one little green light per momentary signal (VAD, wake,
+   listening, PTT, barge-in). signalStore.flashSignal adds `.lit` on the event and drops it
+   ~1s later; the asymmetric transition snaps the light ON, then FADES it out over ~0.8s so
+   the decay reads as a timed fade. Dim (not invisible) at rest so the row stays legible. */
+.signal-light {
+  opacity: 0.28;
+  transition: opacity 0.8s ease-out;
+}
+.signal-light.lit {
+  opacity: 1;
+  transition: opacity 0.08s ease-in;
+}
+
 /* 4. App base. */
 html,
 body,

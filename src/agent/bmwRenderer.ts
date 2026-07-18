@@ -39,6 +39,7 @@ import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
 import { setFeatures, resetFeatures } from "../state/featureStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
+import { flashSignal, type SignalKind } from "./signalStore";
 import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
 // The newest protocol version this renderer understands.
@@ -252,10 +253,31 @@ function onAnimation(evt: { target?: string; action?: string; detail?: string })
   pushConsole("event", `${getActiveBrand().logPrefix} ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
 }
 
-function onActivation(evt: { kind?: string; detail?: string }): void {
+/** Map an activation `kind` to the green-light indicator it drives, or `null` for the
+ *  non-indicator kinds (`endpoint`, `asr`, `idle`). Order matters: `wake`/`ptt` are
+ *  checked before the broad `vad` pattern (which also matches `voice`/`activity`). */
+function signalKindOf(kind: string): SignalKind | null {
+  if (/wake/.test(kind)) return "wake_word";
+  if (/ptt|push.?to.?talk/.test(kind)) return "ptt";
+  if (/barge.?in/.test(kind)) return "barge_in";
+  if (/listening|armed/.test(kind)) return "listening";
+  if (/vad|voice|speech|activity/.test(kind)) return "vad";
+  return null;
+}
+
+function onActivation(evt: { kind?: string; detail?: string; active?: boolean }): void {
   const kind = String(evt.kind ?? "").toLowerCase();
   const detail = evt.detail ? String(evt.detail) : "";
   pushConsole("event", `${getActiveBrand().logPrefix} ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
+  // Light the momentary green indicator for the front-end signal kinds (vad/wake_word/
+  // listening/ptt/barge_in); it decays after ~1s (signalStore). The `active` phase edge,
+  // when present, or the free-text detail (barge-in phase) rides along for display.
+  const sig = signalKindOf(kind);
+  if (sig) {
+    const label = evt.active === true ? "on" : evt.active === false ? "off" : detail;
+    flashSignal(sig, label);
+  }
+  // Existing voice-status PHASE logic (unchanged) — orthogonal to the green lights.
   if (/wake/.test(kind)) setPhase("wake");
   else if (/vad|voice|speech|activity/.test(kind)) {
     if (detail) setTranscript(detail);
@@ -326,7 +348,7 @@ function dispatch(evt: unknown): void {
     case "animation":
       return onAnimation(e as { target?: string; action?: string; detail?: string });
     case "activation":
-      return onActivation(e as { kind?: string; detail?: string });
+      return onActivation(e as { kind?: string; detail?: string; active?: boolean });
     case "outcome":
       return onOutcome(e as { intent?: string; result?: string; reason?: string });
     default:

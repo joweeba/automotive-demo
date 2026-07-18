@@ -6,6 +6,7 @@ import { MusicPlayer } from "./MusicPlayer";
 import { AgentFab } from "./AgentFab";
 import { AgentPanel } from "./agent/AgentPanel";
 import { ActiveFeaturesPanel } from "./ActiveFeaturesPanel";
+import { SignalIndicators } from "./agent/SignalIndicators";
 import { useAgent } from "../agent/agentStore";
 
 // Canvas background — the 3D viewport renders transparently on top of this.
@@ -61,6 +62,12 @@ export function AppShell() {
         />
 
         <Header />
+
+        {/* Front-end signal indicators (VAD / wake / listening / PTT / barge-in): a row of
+            little green lights, top-center, that flash on each momentary signal and fade. */}
+        <div className="absolute left-1/2 top-5 -translate-x-1/2">
+          <SignalIndicators />
+        </div>
 
         {/* Active-features overlay: the generic `feature.*` channel (long-tail grounded
             commands with no dedicated 3D affordance). Shows itself only when non-empty. */}
