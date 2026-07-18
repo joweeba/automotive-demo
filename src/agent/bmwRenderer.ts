@@ -17,8 +17,10 @@
 //   snapshot     — full flattened state, always the first line
 //   state_change — { changes:[{path,from,to}], state_summary }
 //   animation    — { target, action, detail }  (physical actuation cue)
-//   activation   — { kind, detail }             (VAD / wake / endpoint)
+//   activation   — { kind, detail, active? }    (VAD / wake / listening / ptt / endpoint / barge_in)
 //   outcome      — { intent, result, reason }   (v2: the grounding verdict for a turn)
+//   audio_cue    — { kind, reason }             (opt-in: a short acknowledgement chime)
+//   audio_out    — { format, rate, seq, final, pcm }  (streaming spoken-reply PCM — TTS seam)
 //
 // This web sedan rig models a SUBSET of what a 3-series tracks. Mapped paths
 // drive the car; everything else (windows, sunroof, ambient color, drive mode,
@@ -40,6 +42,8 @@ import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musi
 import { setFeatures, resetFeatures } from "../state/featureStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
 import { flashSignal, resetSignals, type SignalKind } from "./signalStore";
+import { playChime } from "../audio/cues";
+import { handleAudioOut, type AudioOutFrame } from "../audio/ttsPlayback";
 import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
 // The newest protocol version this renderer understands.
@@ -330,6 +334,27 @@ function onOutcome(evt: { intent?: string; result?: string; reason?: string }): 
   pushConsole(level, `${getActiveBrand().logPrefix} ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
 }
 
+function onAudioCue(evt: { kind?: string; reason?: string }): void {
+  // A momentary acknowledgement chime (the assistant heard the wake word / started
+  // listening / a PTT press). Play a short Web Audio tone; surface it in the console.
+  const reason = String(evt.reason ?? "");
+  const kind = String(evt.kind ?? "chime");
+  pushConsole("event", `${getActiveBrand().logPrefix} ♪ ${kind}${reason ? ` (${reason})` : ""}`);
+  playChime(reason);
+}
+
+function onAudioOut(frame: AudioOutFrame): void {
+  // One frame of the assistant's spoken-reply PCM (the TTS audio-out seam). Route it to
+  // the playback path (decode + Web Audio); the terminal `final` frame closes the
+  // utterance. Only the first + final frames are logged so a long reply doesn't spam.
+  if (frame.seq === 0) {
+    pushConsole("event", `${getActiveBrand().logPrefix} ♫ tts audio-out (${frame.rate ?? 24000} Hz)`);
+  } else if (frame.final) {
+    pushConsole("event", `${getActiveBrand().logPrefix} ♫ tts audio-out complete`);
+  }
+  handleAudioOut(frame);
+}
+
 function dispatch(evt: unknown): void {
   if (evt == null || typeof evt !== "object") return;
   const e = evt as Record<string, unknown>;
@@ -351,6 +376,10 @@ function dispatch(evt: unknown): void {
       return onActivation(e as { kind?: string; detail?: string; active?: boolean });
     case "outcome":
       return onOutcome(e as { intent?: string; result?: string; reason?: string });
+    case "audio_cue":
+      return onAudioCue(e as { kind?: string; reason?: string });
+    case "audio_out":
+      return onAudioOut(e as AudioOutFrame);
     default:
       pushConsole("event", `${getActiveBrand().logPrefix}: ignored event "${String(e.event)}"`);
   }
