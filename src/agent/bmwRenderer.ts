@@ -39,7 +39,7 @@ import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
 import { setFeatures, resetFeatures } from "../state/featureStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
-import { flashSignal, type SignalKind } from "./signalStore";
+import { flashSignal, resetSignals, type SignalKind } from "./signalStore";
 import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
 // The newest protocol version this renderer understands.
@@ -471,6 +471,7 @@ export function resetAudioFrameCount(): void {
 export function reset(): void {
   mirror = {};
   resetFeatures();
+  resetSignals();
 }
 
 // ── WebSocket transport ─────────────────────────────────────────────────────

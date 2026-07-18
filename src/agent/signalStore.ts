@@ -104,9 +104,13 @@ export function flashSignal(kind: SignalKind, detail = ""): void {
   }, SIGNAL_DECAY_MS);
 }
 
-/** Reset all indicators (used by tests + on renderer reset). */
+/** Reset all indicators (used by tests + on renderer reset). Tokens are BUMPED, not
+ *  zeroed, so any decay `setTimeout` still pending from before the reset is invalidated
+ *  (its captured token can never match again) — otherwise a stale timer could fire after
+ *  a fresh post-reset flash and clear that light early. Monotonicity is what the token
+ *  scheme relies on, so we must never roll the counter back. */
 export function resetSignals(): void {
   state = fresh();
-  for (const k of SIGNAL_KINDS) tokens[k] = 0;
+  for (const k of SIGNAL_KINDS) tokens[k] += 1;
   emit();
 }

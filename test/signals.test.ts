@@ -49,6 +49,20 @@ describe("signalStore — indicator light + timed decay", () => {
     expect(getSignalState().ptt.lit).toBe(false);
   });
 
+  it("reset clears the lights and a stale pre-reset decay cannot clear a fresh flash", () => {
+    // Regression: resetSignals must invalidate any in-flight decay timer, or a stale one
+    // firing after a fresh post-reset flash would clear that light early.
+    flashSignal("vad");
+    vi.advanceTimersByTime(500); // decay A pending at t=1000
+    resetSignals();
+    expect(getSignalState().vad.lit).toBe(false);
+    flashSignal("vad"); // decay B pending at t=1500; light on now
+    vi.advanceTimersByTime(SIGNAL_DECAY_MS - 500); // t=1000 — where decay A WOULD have fired
+    expect(getSignalState().vad.lit).toBe(true); // B's window is still open — must stay lit
+    vi.advanceTimersByTime(500); // t=1500 — close B's window
+    expect(getSignalState().vad.lit).toBe(false);
+  });
+
   it("each signal kind decays independently", () => {
     flashSignal("wake_word");
     vi.advanceTimersByTime(500);
