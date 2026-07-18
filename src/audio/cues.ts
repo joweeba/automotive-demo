@@ -21,29 +21,38 @@ const CUE_HZ: Record<string, number> = {
   ptt: 523, // C5
 };
 
-function webAudioChime(reason: CueReason): void {
+// A single reused AudioContext (created lazily on the first chime) rather than one per
+// tone: back-to-back cues (e.g. wake_word then listening) would otherwise pile up
+// concurrent contexts, and some browsers cap those (Safari) — `new AudioContext()` then
+// throws. Reusing one matches the ttsPlayback sink and avoids audio-hardware churn.
+let sharedCtx: AudioContext | null = null;
+
+function chimeContext(): AudioContext | null {
+  if (sharedCtx) return sharedCtx;
   const Ctx =
-    (globalThis as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
-      .AudioContext ??
+    (globalThis as unknown as { AudioContext?: typeof AudioContext }).AudioContext ??
     (globalThis as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!Ctx) return; // no Web Audio (node/tests/SSR) — silently skip
-  const ctx = new Ctx();
+  if (!Ctx) return null; // no Web Audio (node/tests/SSR)
+  sharedCtx = new Ctx();
+  return sharedCtx;
+}
+
+function webAudioChime(reason: CueReason): void {
+  const ctx = chimeContext();
+  if (!ctx) return; // silently skip where Web Audio is unavailable
   const now = ctx.currentTime;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = "sine";
   osc.frequency.value = CUE_HZ[reason] ?? 700;
-  // A short pluck: quick attack, ~180ms exponential decay.
+  // A short pluck: quick attack, ~180ms exponential decay. The nodes are one-shot
+  // (garbage-collected after `onended`); the shared context stays open for reuse.
   gain.gain.setValueAtTime(0.0001, now);
   gain.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
   gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
   osc.connect(gain).connect(ctx.destination);
   osc.start(now);
   osc.stop(now + 0.2);
-  // Free the context shortly after the tone ends (best-effort).
-  osc.onended = () => {
-    void ctx.close().catch(() => {});
-  };
 }
 
 let player: CuePlayer = webAudioChime;
