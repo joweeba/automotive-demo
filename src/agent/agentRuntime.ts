@@ -23,6 +23,8 @@ import {
   getMirror as bmwGetMirror,
   PROTOCOL_VERSION as BMW_PROTOCOL_VERSION,
 } from "./bmwRenderer";
+import { getActiveBrand, setBrand } from "../brands/brandStore";
+import type { BrandConfig } from "../brands/types";
 
 // ---------------------------------------------------------------------------
 // The public JS bridge the LLM assistant hooks into: window.LiquidCar.
@@ -88,6 +90,10 @@ export interface LiquidCarAPI {
     reset: () => void;
     /** Read-only copy of the mirrored flattened emulator state. */
     getState: () => Record<string, string>;
+    /** The active brand config (BMW / Mercedes) currently rendering the stream. */
+    brand: () => BrandConfig;
+    /** Pin the active brand by id ("bmw" | "mercedes"); returns the resolved config or null. */
+    setBrand: (id: string) => BrandConfig | null;
     /** Convenience typed entrypoints (wrap ingest with the v1 envelope). */
     snapshot: (state: Record<string, string>) => void;
     stateChange: (changes: { path: string; from?: string; to: string }[], summary?: string) => void;
@@ -154,6 +160,8 @@ export function installAgentRuntime(): LiquidCarAPI | null {
       disconnect: bmwDisconnect,
       reset: bmwReset,
       getState: bmwGetMirror,
+      brand: getActiveBrand,
+      setBrand: (id) => setBrand(id, { lock: true }),
       snapshot: (state) => bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "snapshot", state }),
       stateChange: (changes, state_summary) =>
         bmwIngest({ v: BMW_PROTOCOL_VERSION, event: "state_change", changes, state_summary }),
@@ -164,7 +172,23 @@ export function installAgentRuntime(): LiquidCarAPI | null {
 
   (window as unknown as { LiquidCar: LiquidCarAPI }).LiquidCar = api;
   installed = api;
-  pushConsole("event", `LiquidCar runtime v${VERSION} ready · ${TOOLS.length} tools · bmw renderer v${BMW_PROTOCOL_VERSION}`);
+  // Brand selection (configuration over code): `?brand=mercedes` PINS the brand for the
+  // demo; absent, the renderer auto-detects from the live stream (default BMW). Read it
+  // before connecting so the very first snapshot renders under the right vehicle.
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const brandParam = params.get("brand");
+    if (brandParam) {
+      const picked = setBrand(brandParam, { lock: true });
+      if (!picked) pushConsole("error", `unknown ?brand=${brandParam} — keeping ${getActiveBrand().id}`);
+    }
+  } catch {
+    /* location unavailable — ignore */
+  }
+  pushConsole(
+    "event",
+    `LiquidCar runtime v${VERSION} ready · ${TOOLS.length} tools · ${getActiveBrand().make} renderer v${BMW_PROTOCOL_VERSION}`,
+  );
   // Auto-connect to an emulator bridge if the page was opened with ?emulator=ws://…
   try {
     const url = new URLSearchParams(window.location.search).get("emulator");

@@ -17,8 +17,10 @@
 //   snapshot     — full flattened state, always the first line
 //   state_change — { changes:[{path,from,to}], state_summary }
 //   animation    — { target, action, detail }  (physical actuation cue)
-//   activation   — { kind, detail }             (VAD / wake / endpoint)
+//   activation   — { kind, detail, active? }    (VAD / wake / listening / ptt / endpoint / barge_in)
 //   outcome      — { intent, result, reason }   (v2: the grounding verdict for a turn)
+//   audio_cue    — { kind, reason }             (opt-in: a short acknowledgement chime)
+//   audio_out    — { format, rate, seq, final, pcm }  (streaming spoken-reply PCM — TTS seam)
 //
 // This web sedan rig models a SUBSET of what a 3-series tracks. Mapped paths
 // drive the car; everything else (windows, sunroof, ambient color, drive mode,
@@ -37,7 +39,12 @@ import {
 } from "../state/vehicleCommands";
 import type { SeatId, SeatLevel, Climate } from "../state/vehicleState";
 import { getMusic, togglePlay, setVolume, setTrack, TRACKS } from "../state/musicStore";
+import { setFeatures, resetFeatures } from "../state/featureStore";
 import { setPhase, setTranscript, pushConsole, type LogLevel } from "./agentStore";
+import { flashSignal, resetSignals, type SignalKind } from "./signalStore";
+import { playChime } from "../audio/cues";
+import { handleAudioOut, type AudioOutFrame } from "../audio/ttsPlayback";
+import { getActiveBrand, autoDetectBrand } from "../brands/brandStore";
 
 // The newest protocol version this renderer understands.
 export const PROTOCOL_VERSION = 2;
@@ -46,31 +53,10 @@ export const PROTOCOL_VERSION = 2;
 // unknown fields), so we still accept a v1 stream from an older emulator.
 const SUPPORTED_VERSIONS = new Set([1, 2]);
 
-/** Infer the (BMW-vocabulary-less) "heat" glow when the cabin setpoint is this warm. */
-const HEAT_INFER_F = 74;
-
-// The emulator's full 14-zone seat enum → this rig's three seat anchors
-// (driver/passenger/rear). MUST cover every zone value the model can emit for a
-// seat command — including the aggregates (ALL_CAR/FRONT/PASSENGERS) and the
-// bare-call default ALL_CAR — or a seat command lands on no anchor and is
-// silently dropped. Aggregates fan out to multiple anchors; the rig cannot split
-// left/right within a row, so PASSENGER_LEFT/RIGHT collapse to the passenger anchor.
-const ZONE_TO_SEAT: Record<string, SeatId[]> = {
-  DRIVER: ["driver"],
-  FRONT_LEFT: ["driver"],
-  PASSENGER: ["passenger"],
-  FRONT_RIGHT: ["passenger"],
-  PASSENGER_LEFT: ["passenger"],
-  PASSENGER_RIGHT: ["passenger"],
-  REAR_LEFT: ["rear"],
-  REAR_RIGHT: ["rear"],
-  REAR_CENTER: ["rear"],
-  THIRD_ROW: ["rear"],
-  BACK: ["rear"],
-  FRONT: ["driver", "passenger"],
-  PASSENGERS: ["passenger", "rear"],
-  ALL_CAR: ["driver", "passenger", "rear"],
-};
+// The zone→seat-anchor table and the "heat"-inference threshold are now BRAND config
+// (src/brands/*). The renderer reads the ACTIVE brand's config on every apply so the same
+// pipeline renders BMW (uppercase bmw_new zones) or Mercedes (lowercase MBIS zones); see
+// getActiveBrand() / autoDetectBrand(). Nothing brand-specific is hard-coded below.
 
 // ── the mirror ──────────────────────────────────────────────────────────────
 // A local copy of the emulator's flattened state (canonical VehicleState::flatten
@@ -127,7 +113,8 @@ function anyZone(prefix: string, pred: (v: string) => boolean): boolean {
 // ── subsystem appliers (read the whole mirror, idempotent) ──────────────────
 
 function applyClimate(): void {
-  const tF = parseTempF(firstZone("climate.temperature", ["DRIVER", "ALL_CAR", "FRONT", "PASSENGER"]));
+  const brand = getActiveBrand();
+  const tF = parseTempF(firstZone("climate.temperature", brand.tempZones));
   if (tF != null) setTemperature(Math.round(tF));
 
   setFan(anyZone("climate.fan_speed", (v) => v !== "OFF" && v !== "0" && v !== ""));
@@ -144,14 +131,15 @@ function applyClimate(): void {
   let mode: Climate = "off";
   if (acOn) mode = "ac";
   else if (autoOn) mode = "auto";
-  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= HEAT_INFER_F)) mode = "heat";
+  else if (tF != null && ((extF != null && tF > extF + 2) || tF >= brand.heatInferF)) mode = "heat";
   setClimate(mode);
 
   // Seat heating: aggregate the mapped zones to the three seat anchors (take the max).
+  // The zone→anchor table is the ACTIVE brand's (BMW uppercase / Mercedes MBIS lowercase).
   const acc: Record<SeatId, SeatLevel> = { driver: 0, passenger: 0, rear: 0 };
   for (const [path, val] of Object.entries(mirror)) {
     if (!path.startsWith("climate.seat_heating.")) continue;
-    for (const seat of ZONE_TO_SEAT[path.slice("climate.seat_heating.".length)] ?? []) {
+    for (const seat of brand.zoneToSeat[path.slice("climate.seat_heating.".length)] ?? []) {
       acc[seat] = Math.max(acc[seat], seatLevel(val)) as SeatLevel;
     }
   }
@@ -190,6 +178,18 @@ function applyEnvironment(): void {
   // run off the device clock, so we mirror but don't act on them.
 }
 
+/** Reconcile the generic `feature.<name>` channel into the featureStore.
+ *  Data-driven: every `feature.*` path in the mirror lands in the active-features panel,
+ *  known or not — so any grounded long-tail command shows visible feedback and nothing is
+ *  silently dropped. (docs/emulator: `feature.<featureName> = on|off|<value>`.) */
+function applyFeatures(): void {
+  const next: Record<string, string> = {};
+  for (const [path, val] of Object.entries(mirror)) {
+    if (path.startsWith("feature.")) next[path.slice("feature.".length)] = val;
+  }
+  setFeatures(next);
+}
+
 // ── event dispatch ──────────────────────────────────────────────────────────
 
 function reconcile(paths: string[]): void {
@@ -198,21 +198,35 @@ function reconcile(paths: string[]): void {
   if (subs.has("lighting")) applyLighting();
   if (subs.has("media")) applyMedia();
   if (subs.has("info") || subs.has("nav") || subs.has("system")) applyEnvironment();
+  const lp = getActiveBrand().logPrefix;
+  if (subs.has("feature")) {
+    applyFeatures();
+    // A grounded long-tail feature: surface it (never an error — a valid grounded command).
+    for (const p of paths) {
+      if (p.startsWith("feature."))
+        pushConsole("tool", `${lp} ✦ ${p.slice("feature.".length)}=${mirror[p]}`);
+    }
+  }
   // Subsystems the web rig can't show yet — surface, don't drop (spec: no silent truncation).
   for (const p of paths) {
     const top = p.split(".")[0];
     if (top === "body" || top === "drive" || top === "apps" || top === "comms")
-      pushConsole("info", `bmw: ${p}=${mirror[p]} (no web rig mapping)`);
+      pushConsole("info", `${lp}: ${p}=${mirror[p]} (no web rig mapping)`);
   }
 }
 
 function onSnapshot(state: Record<string, string>): void {
   mirror = { ...state };
-  pushConsole("event", `bmw ⬒ snapshot — ${Object.keys(mirror).length} state paths`);
+  // Re-select the brand from the fresh mirror (unless `?brand=` pinned it). The snapshot
+  // alone usually looks brand-neutral (engine boot default); the boot reconcile below
+  // reveals the Mercedes markers. Safe to call on every snapshot (idempotent).
+  autoDetectBrand(mirror);
+  pushConsole("event", `${getActiveBrand().logPrefix} ⬒ snapshot — ${Object.keys(mirror).length} state paths`);
   applyClimate();
   applyLighting();
   applyMedia();
   applyEnvironment();
+  applyFeatures();
 }
 
 interface Change {
@@ -223,12 +237,16 @@ interface Change {
 
 function onStateChange(changes: Change[]): void {
   const paths: string[] = [];
+  const lp = getActiveBrand().logPrefix;
   for (const c of changes) {
     if (!c || typeof c.path !== "string") continue;
     mirror[c.path] = c.to;
     paths.push(c.path);
-    pushConsole("tool", `bmw Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
+    pushConsole("tool", `${lp} Δ ${c.path}: ${c.from || "∅"} → ${c.to}`);
   }
+  // The boot reconcile is where the Mercedes markers (W1K VIN, lowercase MBIS zone keys)
+  // first appear, so re-detect here too (no-op when `?brand=` pinned the brand).
+  autoDetectBrand(mirror);
   reconcile(paths);
 }
 
@@ -236,13 +254,34 @@ function onAnimation(evt: { target?: string; action?: string; detail?: string })
   // The physical-actuation cue for the turn's command; the visual change already
   // arrived via state_change, so we log it as a trace marker.
   const parts = [evt.target, evt.action].filter(Boolean).join(".");
-  pushConsole("event", `bmw ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
+  pushConsole("event", `${getActiveBrand().logPrefix} ⚙ ${parts}${evt.detail ? `(${evt.detail})` : ""}`);
 }
 
-function onActivation(evt: { kind?: string; detail?: string }): void {
+/** Map an activation `kind` to the green-light indicator it drives, or `null` for the
+ *  non-indicator kinds (`endpoint`, `asr`, `idle`). Order matters: `wake`/`ptt` are
+ *  checked before the broad `vad` pattern (which also matches `voice`/`activity`). */
+function signalKindOf(kind: string): SignalKind | null {
+  if (/wake/.test(kind)) return "wake_word";
+  if (/ptt|push.?to.?talk/.test(kind)) return "ptt";
+  if (/barge.?in/.test(kind)) return "barge_in";
+  if (/listening|armed/.test(kind)) return "listening";
+  if (/vad|voice|speech|activity/.test(kind)) return "vad";
+  return null;
+}
+
+function onActivation(evt: { kind?: string; detail?: string; active?: boolean }): void {
   const kind = String(evt.kind ?? "").toLowerCase();
   const detail = evt.detail ? String(evt.detail) : "";
-  pushConsole("event", `bmw ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
+  pushConsole("event", `${getActiveBrand().logPrefix} ◉ activation:${kind}${detail ? ` ${detail}` : ""}`);
+  // Light the momentary green indicator for the front-end signal kinds (vad/wake_word/
+  // listening/ptt/barge_in); it decays after ~1s (signalStore). The `active` phase edge,
+  // when present, or the free-text detail (barge-in phase) rides along for display.
+  const sig = signalKindOf(kind);
+  if (sig) {
+    const label = evt.active === true ? "on" : evt.active === false ? "off" : detail;
+    flashSignal(sig, label);
+  }
+  // Existing voice-status PHASE logic (unchanged) — orthogonal to the green lights.
   if (/wake/.test(kind)) setPhase("wake");
   else if (/vad|voice|speech|activity/.test(kind)) {
     if (detail) setTranscript(detail);
@@ -254,38 +293,66 @@ function onActivation(evt: { kind?: string; detail?: string }): void {
   else if (/idle|reset|done|silence/.test(kind)) setPhase("idle");
 }
 
-// Human-readable labels for the v2 `outcome.result` enum.
+// Human-readable labels for the v2 `outcome.result` enum. `cloud_deferred` is the
+// Mercedes/MBIS class (the request is an online/cloud capability, not a cabin action);
+// BMW never emits it, so adding it here is additive and brand-safe.
 const OUTCOME_LABEL: Record<string, string> = {
   applied: "applied",
   read: "read",
   rejected: "rejected",
   not_equipped: "not equipped",
   not_implemented: "not implemented",
+  cloud_deferred: "cloud deferred",
 };
+
+// Outcome classes that are EXPECTED, non-error product states (surface, don't red-error).
+const OUTCOME_INFO = new Set(["not_equipped", "not_implemented", "cloud_deferred"]);
 
 function onOutcome(evt: { intent?: string; result?: string; reason?: string }): void {
   // The v2 grounding verdict for a turn. For applied/read the visible change already
   // arrived via state_change; this surfaces WHY a command did nothing — a feature this
-  // trim lacks (not_equipped) or one the emulator can't ground yet (not_implemented) —
-  // so it is visible in the console instead of silently ignored.
+  // trim lacks (not_equipped), one the cabin can't ground yet (not_implemented), or a
+  // cloud/online request deferred off-device (cloud_deferred) — so it is visible in the
+  // console instead of silently ignored.
   const intent = evt.intent ? String(evt.intent) : "(unknown)";
   const result = String(evt.result ?? "");
   const label = OUTCOME_LABEL[result] ?? result ?? "";
   const reason = evt.reason ? ` — ${String(evt.reason)}` : "";
   // Severity by outcome CLASS, not "anything that isn't applied is an error".
-  //  - applied / read           → event  (the visible change already arrived)
-  //  - not_equipped / not_impl. → info   (EXPECTED product states: this trim
-  //                                        lacks the feature, or the head-unit UI
-  //                                        doesn't cover it yet — surface, don't
-  //                                        red-error, or every gated command spews)
-  //  - rejected / unknown       → error  (a genuinely malformed / unmodeled call)
+  //  - applied / read                            → event  (the visible change arrived)
+  //  - not_equipped / not_impl. / cloud_deferred → info   (EXPECTED product states —
+  //                                                 surface, don't red-error, or every
+  //                                                 gated/deferred command spews)
+  //  - rejected / unknown                        → error  (a genuinely malformed /
+  //                                                 unmodeled / out-of-domain call)
   const level: LogLevel =
     result === "applied" || result === "read"
       ? "event"
-      : result === "not_equipped" || result === "not_implemented"
+      : OUTCOME_INFO.has(result)
         ? "info"
         : "error";
-  pushConsole(level, `bmw ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
+  pushConsole(level, `${getActiveBrand().logPrefix} ⌁ outcome: ${intent} → ${label || "(no result)"}${reason}`);
+}
+
+function onAudioCue(evt: { kind?: string; reason?: string }): void {
+  // A momentary acknowledgement chime (the assistant heard the wake word / started
+  // listening / a PTT press). Play a short Web Audio tone; surface it in the console.
+  const reason = String(evt.reason ?? "");
+  const kind = String(evt.kind ?? "chime");
+  pushConsole("event", `${getActiveBrand().logPrefix} ♪ ${kind}${reason ? ` (${reason})` : ""}`);
+  playChime(reason);
+}
+
+function onAudioOut(frame: AudioOutFrame): void {
+  // One frame of the assistant's spoken-reply PCM (the TTS audio-out seam). Route it to
+  // the playback path (decode + Web Audio); the terminal `final` frame closes the
+  // utterance. Only the first + final frames are logged so a long reply doesn't spam.
+  if (frame.seq === 0) {
+    pushConsole("event", `${getActiveBrand().logPrefix} ♫ tts audio-out (${frame.rate ?? 24000} Hz)`);
+  } else if (frame.final) {
+    pushConsole("event", `${getActiveBrand().logPrefix} ♫ tts audio-out complete`);
+  }
+  handleAudioOut(frame);
 }
 
 function dispatch(evt: unknown): void {
@@ -294,7 +361,7 @@ function dispatch(evt: unknown): void {
   if (e.v !== undefined && !SUPPORTED_VERSIONS.has(e.v as number)) {
     pushConsole(
       "error",
-      `bmw: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
+      `${getActiveBrand().logPrefix}: refusing unknown protocol v=${String(e.v)} (support v=${[...SUPPORTED_VERSIONS].join("/")})`,
     );
     return;
   }
@@ -306,11 +373,15 @@ function dispatch(evt: unknown): void {
     case "animation":
       return onAnimation(e as { target?: string; action?: string; detail?: string });
     case "activation":
-      return onActivation(e as { kind?: string; detail?: string });
+      return onActivation(e as { kind?: string; detail?: string; active?: boolean });
     case "outcome":
       return onOutcome(e as { intent?: string; result?: string; reason?: string });
+    case "audio_cue":
+      return onAudioCue(e as { kind?: string; reason?: string });
+    case "audio_out":
+      return onAudioOut(e as AudioOutFrame);
     default:
-      pushConsole("event", `bmw: ignored event "${String(e.event)}"`);
+      pushConsole("event", `${getActiveBrand().logPrefix}: ignored event "${String(e.event)}"`);
   }
 }
 
@@ -323,7 +394,7 @@ export function ingest(data: string | object): void {
     try {
       dispatch(JSON.parse(t));
     } catch {
-      pushConsole("error", `bmw: unparseable line: ${t.slice(0, 80)}`);
+      pushConsole("error", `${getActiveBrand().logPrefix}: unparseable line: ${t.slice(0, 80)}`);
     }
   }
 }
@@ -333,9 +404,103 @@ export function getMirror(): Record<string, string> {
   return { ...mirror };
 }
 
-/** Clear the mirror (e.g. before reconnecting to a fresh emulator). */
+// ── outbound: mic control + audio (bidirectional, same socket) ───────────────
+// The receive path above consumes the emulator's NDJSON stream unchanged; here
+// we SEND on the same socket per the shared WS protocol:
+//   • Control = WS TEXT frame, JSON `{"v":2,"in":"<cmd>",...}`
+//   • Audio   = WS BINARY frame, raw little-endian PCM16 mono 16 kHz, no header
+// Binary frames are only meaningful between a start (mic_start/ptt_down) and its
+// matching stop (mic_stop/ptt_up); the emulator enforces that, we just send.
+
+/** The four control commands the UI can send. */
+export type MicControlCmd = "mic_start" | "mic_stop" | "ptt_down" | "ptt_up";
+
+/** Audio-format descriptor included with the "start" commands (matches the wire spec). */
+export const AUDIO_FORMAT = {
+  sample_rate: 16000,
+  format: "pcm16le",
+  channels: 1,
+} as const;
+
+/**
+ * Build the JSON control message for a command (pure — unit-tested). `mic_start`
+ * and `ptt_down` carry the audio-format descriptor; the stops are bare.
+ */
+export function buildControlMessage(cmd: MicControlCmd): Record<string, unknown> {
+  const msg: Record<string, unknown> = { v: PROTOCOL_VERSION, in: cmd };
+  if (cmd === "mic_start" || cmd === "ptt_down") Object.assign(msg, AUDIO_FORMAT);
+  return msg;
+}
+
+/** True when the socket is present and open (safe to send). */
+function socketOpen(): boolean {
+  return (
+    socket != null &&
+    typeof WebSocket !== "undefined" &&
+    socket.readyState === WebSocket.OPEN
+  );
+}
+
+/**
+ * Send a mic control command as a JSON TEXT frame. No-ops (drops) gracefully if
+ * the socket is not open — never throws.
+ */
+export function sendControl(cmd: MicControlCmd): void {
+  if (!socketOpen()) {
+    console.warn(`[mic-debug] control "${cmd}" DROPPED — WebSocket not open (readyState=${socket?.readyState ?? "null"}). Did you open the UI with ?emulator=ws://localhost:8787 ?`);
+    pushConsole("info", `bmw: drop control "${cmd}" (socket not open)`);
+    return;
+  }
+  try {
+    socket!.send(JSON.stringify(buildControlMessage(cmd)));
+    console.info(`[mic-debug] → control ${cmd}`);
+    pushConsole("tool", `bmw → ${cmd}`);
+  } catch (err) {
+    console.error(`[mic-debug] control send failed:`, err);
+    pushConsole("error", `bmw: control send failed: ${String(err)}`);
+  }
+}
+
+// Diagnostic: count audio frames sent so we can see (in the browser console)
+// whether the worklet is actually producing + shipping audio, without spamming.
+let audioFrameCount = 0;
+
+/**
+ * Send one frame of PCM16 audio as a BINARY frame. Drops silently if the socket
+ * is not open (audio frames are high-rate; we don't log each drop). Never throws.
+ */
+export function sendAudio(pcm16: Int16Array): void {
+  if (pcm16.length === 0) return;
+  if (!socketOpen()) {
+    if (audioFrameCount === 0)
+      console.warn(`[mic-debug] audio frame produced but WebSocket not open — dropping (readyState=${socket?.readyState ?? "null"})`);
+    return;
+  }
+  try {
+    // Send exactly this view's bytes (respect byteOffset/length if it's a slice).
+    socket!.send(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength));
+    audioFrameCount++;
+    if (audioFrameCount === 1 || audioFrameCount % 25 === 0)
+      console.info(`[mic-debug] → audio frame #${audioFrameCount} (${pcm16.length} samples)`);
+  } catch {
+    /* transient send failure — drop the frame, keep streaming */
+  }
+}
+
+/** Reset the diagnostic audio-frame counter (call on stop so the next stream re-logs). */
+export function resetAudioFrameCount(): void {
+  audioFrameCount = 0;
+}
+
+/** Clear the mirror (e.g. before reconnecting to a fresh emulator). Deliberately does NOT
+ *  touch the active brand: a `?brand=` pin (and an already auto-detected brand) must
+ *  SURVIVE a reconnect — the browser reads `?brand=` only once at install. Tests that want
+ *  a clean brand state call resetBrand() explicitly. autoDetectBrand() still re-selects on
+ *  the next snapshot/state_change when the brand is unpinned. */
 export function reset(): void {
   mirror = {};
+  resetFeatures();
+  resetSignals();
 }
 
 // ── WebSocket transport ─────────────────────────────────────────────────────
@@ -356,15 +521,23 @@ function openSocket(): void {
     scheduleReconnect();
     return;
   }
+  console.info(`[mic-debug] WebSocket connecting to ${wantUrl}…`);
   pushConsole("event", `bmw: connecting to ${wantUrl}…`);
-  socket.onopen = () => pushConsole("event", `bmw: connected ${wantUrl}`);
+  socket.onopen = () => {
+    console.info(`[mic-debug] WebSocket OPEN ${wantUrl}`);
+    pushConsole("event", `bmw: connected ${wantUrl}`);
+  };
   socket.onmessage = (ev) => {
     if (typeof ev.data === "string") ingest(ev.data);
   };
-  socket.onerror = () => pushConsole("error", "bmw: socket error");
+  socket.onerror = () => {
+    console.error(`[mic-debug] WebSocket ERROR for ${wantUrl}`);
+    pushConsole("error", "bmw: socket error");
+  };
   socket.onclose = () => {
     socket = null;
     if (wantUrl) {
+      console.warn(`[mic-debug] WebSocket CLOSED ${wantUrl} — retrying`);
       pushConsole("event", "bmw: disconnected — retrying");
       scheduleReconnect();
     }

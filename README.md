@@ -86,6 +86,39 @@ Pick based on **where the vehicle state lives**:
   Full event handling, the BMW-path→3D mapping table, and the Celsius/zone handling are in
   [`AGENT_TOOLBOX.md` §5](./AGENT_TOOLBOX.md#5-bmw-emulator-renderer-liquidcarrender).
 
+### Multi-brand (BMW / Mercedes) — configuration over code
+
+The renderer is **brand-config driven** (`src/brands/{bmw,mercedes}`). The same NDJSON
+pipeline renders either cabin; a brand is a `BrandConfig` (vehicle label, wake-word display,
+zone set, zone→seat-anchor table, outcome handling), selected at runtime:
+
+- `?brand=bmw` | `?brand=mercedes` **pins** the brand (authoritative — the demo selector).
+- Absent, the renderer **auto-detects** from the live stream (Mercedes' W1K VIN + lowercase
+  MBIS zone keys) and falls back to **BMW** (default).
+
+Launch the **Mercedes** demo (from the [`assistant`](https://github.com/Liquid4All/assistant) repo for the emulator):
+
+```bash
+# 1) emulator → Mercedes EQS cabin, MBIS vocabulary, WebSocket bridge on :8787
+cargo run -p emulator --features ui -- \
+  brand_profiles/mercedes/profile.kv \
+  --vehicle-profile emulator_profiles/mercedes_eqs/vehicle.kv --ui
+
+# 2) this app
+npm run dev
+
+# 3) open (pins Mercedes + auto-connects to the bridge)
+#    http://localhost:5173/?brand=mercedes&emulator=ws://localhost:8787
+```
+
+Swap the two profile args for `brand_profiles/bmw/…` + `emulator_profiles/bmw_3series/…`
+(and `?brand=bmw`) for the BMW cabin. What renders vs. shows a "not available on this
+vehicle" affordance is driven entirely by the emulator's per-turn `outcome` class
+(`applied`/`read`/`not_implemented`/`cloud_deferred`/`rejected`) — the MBIS slice-1 cabin
+returns mostly `not_implemented` today (climate grounding lands separately), and every
+class is surfaced, never dropped. The Mercedes regression corpus + its generator live in
+`test/fixtures/mercedes/` and `tools/gen_mercedes_golden.py`.
+
 ### Wiring it to a model (tool-calling loop)
 
 1. **Register the tools.** Map `LiquidCar.tools` onto your provider's function-tool schema.

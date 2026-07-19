@@ -1,0 +1,1 @@
+{"signature": "message.send-contactName", "intent": "message.send-contactName", "domain": "message", "events": [{"v": 2, "event": "outcome", "intent": "message.send-contactName", "result": "rejected", "reason": "intent `message.send-contactName`: slot set [] is not an allowed combination"}]}

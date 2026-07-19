@@ -6,6 +6,8 @@ import { GroundTabs } from "./sections/SceneSection";
 import { MusicPlayer } from "./MusicPlayer";
 import { AgentFab } from "./AgentFab";
 import { AgentPanel } from "./agent/AgentPanel";
+import { ActiveFeaturesPanel } from "./ActiveFeaturesPanel";
+import { SignalIndicators } from "./agent/SignalIndicators";
 import { useAgent } from "../agent/agentStore";
 
 // Canvas background — the 3D viewport renders transparently on top of this.
@@ -61,6 +63,18 @@ export function AppShell() {
         />
 
         <Header />
+
+        {/* Front-end signal indicators (VAD / wake / listening / PTT / barge-in): a row of
+            little green lights, top-center, that flash on each momentary signal and fade. */}
+        <div className="absolute left-1/2 top-5 -translate-x-1/2">
+          <SignalIndicators />
+        </div>
+
+        {/* Active-features overlay: the generic `feature.*` channel (long-tail grounded
+            commands with no dedicated 3D affordance). Shows itself only when non-empty. */}
+        <div className="absolute left-5 top-[120px]">
+          <ActiveFeaturesPanel />
+        </div>
 
         {/* Camera-view + ground switchers float top-right over the viewport in the base
             layout; they dock into the config panel top while the agent chat is open. */}
